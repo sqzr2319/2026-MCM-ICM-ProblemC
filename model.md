@@ -129,3 +129,115 @@ $$
 
 - 决赛加分规则：定义每季的“决赛”为该季最后一次发生淘汰的周。若该周的淘汰者全部预测正确，则视作也预测对了“冠军”，在分子额外加 1，并在分母额外加该季的决赛场次 1。故总体目标数从“仅淘汰者总数”扩展为“淘汰者总数 + 决赛场次数”，即总人数。
 
+## **五、确定性指标**
+
+使用训练好的模型参数，计算每个选手在每周的 $V_{s,i,t}$。我们采用 $V_{s,i,t}$ 的标准差作为不确定性指标，利用 **Delta 方法** 从参数向量出发计算标准差。
+
+设参数向量为：
+$$
+\theta = \begin{bmatrix}
+\gamma_{1,1} \\ \vdots \\ \gamma_{S,N_S} \\
+\delta_1 \\
+\delta_2
+\end{bmatrix}
+\in \mathbb{R}^{M}
+$$
+其中 $M = \sum_{s=1}^{34} N_s + 2$。
+
+$$
+P_{s,i,t} = \gamma_{s,i} + \delta_1 J_{s,i,t} + \delta_2 F_{s,i}
+$$
+
+梯度为：
+$$
+\nabla_\theta P_{s,i,t} = \begin{cases}
+1 & \text{对应 } \gamma_{s,i} \\
+J_{s,i,t} & \text{对应 } \delta_1 \\
+F_{s,i} & \text{对应 } \delta_2 \\
+0 & \text{其他}
+\end{cases}
+$$
+
+$$
+\tilde{P}_{s,i,t} = P_{s,i,t} - \min_{j \in A_t} P_{s,j,t}
+$$
+其中 $A_t$ 是第 $t$ 周活跃选手集合。
+
+为保证可导与数值稳定，采用 softmin 平滑最小值：
+$$
+ m_{\text{soft}}(P) = -\frac{1}{\alpha} \log \sum_{j \in A_t} e^{-\alpha P_{s,j,t}}, \quad \alpha = 50
+$$
+并令 $\tilde{P}_{s,i,t} = P_{s,i,t} - m_{\text{soft}}(P)$ 进入梯度与 Delta 方法的方差计算。
+
+$$
+V_{s,i,t} = \frac{\tilde{P}_{s,i,t}}{S_t}, \quad S_t = \sum_{j \in A_t} \tilde{P}_{s,j,t}
+$$
+
+使用商法则：
+$$
+\frac{\partial V_{s,i,t}}{\partial \theta} = \frac{1}{S_t} \frac{\partial \tilde{P}_{s,i,t}}{\partial \theta} - \frac{\tilde{P}_{s,i,t}}{S_t^2} \frac{\partial S_t}{\partial \theta}
+$$
+
+其中：
+$$
+\frac{\partial S_t}{\partial \theta} = \sum_{j \in A_t} \frac{\partial \tilde{P}_{s,j,t}}{\partial \theta}
+$$
+
+接下来我们需要参数协方差矩阵 $\Sigma_\theta$：
+
+$$
+\Sigma_\theta = -\left[\nabla^2 \mathcal{L}(\hat{\theta})\right]^{-1}
+$$
+其中 $\nabla^2 \mathcal{L}(\hat{\theta})$ 是**对数似然函数在最优参数 $\hat{\theta}$ 处的Hessian矩阵**。
+
+对于你的模型，对数似然为：
+$$
+\mathcal{L}(\theta) = \sum_{s,i,t} L_{s,i,t} \log \mathbb{P}_{s,i,t}(\theta)
+$$
+
+其中 $\mathbb{P}_{s,i,t}(\theta)$ 根据季节类型不同（百分比法/排名法/二次选择）而不同。
+
+**Hessian计算**：
+$$
+H = \nabla^2 \mathcal{L}(\theta) = \sum_{s,i,t} L_{s,i,t} \left[ \frac{\nabla^2 \mathbb{P}_{s,i,t}}{\mathbb{P}_{s,i,t}} - \frac{\nabla \mathbb{P}_{s,i,t} \otimes \nabla \mathbb{P}_{s,i,t}}{\mathbb{P}_{s,i,t}^2} \right]
+$$
+
+由于需要二阶导数，计算复杂。实际中常用经验Fisher信息矩阵近似：
+
+$$
+\hat{H} \approx -\sum_{s,i,t} \nabla \log \mathbb{P}_{s,i,t} \cdot \nabla \log \mathbb{P}_{s,i,t}^T
+$$
+
+这是Hessian的负定近似，更易计算。
+
+然后使用 Delta 方法计算方差。$V_{s,i,t}$ 的方差为：
+$$
+\text{Var}(V_{s,i,t}) = \mathbf{g}_{V}^T \Sigma_\theta \mathbf{g}_{V}
+$$
+其中 $\mathbf{g}_{V} = \frac{\partial V_{s,i,t}}{\partial \theta} \in \mathbb{R}^M$ 是已推导的梯度向量。
+
+标准差：
+$$
+\text{SD}(V_{s,i,t}) = \sqrt{\mathbf{g}_{V}^T \Sigma_\theta \mathbf{g}_{V}}
+$$
+
+## **六、检验**
+
+使用模型预测的 $V_{s,i,t}$，对每个赛季每周分别应用百分比法和排名法，计算预测淘汰者。计算两种规则下预测结果的一致率。
+
+为了比较哪种规则比另一种更倾向于粉丝投票，我们再采用一种新规则：只根据 $V_{s,i,t}$ 排名淘汰选手。计算这种“纯大众投票”规则与原规则（百分比法/排名法）预测结果的一致率，一致率更高的规则更倾向于粉丝投票。
+
+接着我们检查特定"争议"名人（即评委与粉丝意见存在分歧的情况）：
+
+- 第2季 - Jerry Rice，尽管有5周获得最低评委评分，但仍获得亚军。
+- 第4季 - Billy Ray Cyrus，尽管有6周获得最后一名评委评分，但仍获得第5名。
+- 第11季 - Bristol Palin，尽管12次获得最低评委评分，但仍获得第3名。
+- 第27季 - Bobby Bones，尽管评委评分持续较低，但仍赢得冠军。
+
+对这些选手，使用模型预测的 $V_{s,i,t}$，分别应用百分比法、排名法、带有二次选择的排名法，检查是否会导致相同的结果。计算三种方法中哪一种引起的争议最少（即与实际的争议结果一致率最低）。
+
+## **七、名人特征的影响**
+
+使用训练好的模型参数 $\gamma_{s,i}$，对年龄绘制散点图，做回归分析；对行业、家乡国家地区、家乡州（美国选手）绘制箱线图，检验这些特征对粉丝投票的影响（即选手固有流行度）是否显著。
+
+对专业评审打分而言，我们认为专业评审旨在反映哪些舞者技术更好，因此可以认为名人特征对评委打分没有显著影响。

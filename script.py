@@ -10,11 +10,8 @@ def process_csv(input_path: str = "data.csv", output_path: str = "data_new.csv")
 	# 读取原始CSV（全部按字符串读取，便于处理 'N/A'）
 	df = pd.read_csv(input_path, dtype=str)
 
-	# 1) 将 season 置于最左，并将 index 改为“对每个 season 从 1 开始计数”
-	if "season" not in df.columns:
-		raise KeyError("Missing 'season' column in input data")
-	# 保持原有顺序分组计数
-	df["index"] = df.groupby("season").cumcount() + 1
+	# 1) 在最左端插入 index 从1开始
+	df.insert(0, "index", range(1, len(df) + 1))
 
 	# 准备并确保评委列存在（缺失则填充为 NaN）
 	judge_cols = []
@@ -70,18 +67,6 @@ def process_csv(input_path: str = "data.csv", output_path: str = "data_new.csv")
 	# 将周平均列中的 NaN 转为 'N/A' 字符串（与需求一致）
 	for c in week_avg_cols:
 		df[c] = df[c].apply(lambda x: "N/A" if pd.isna(x) else x)
-
-	# 若 placement 为 1，则将 last_active_week 记为 0；随后删除 placement 列
-	if "placement" in df.columns:
-		place_num = pd.to_numeric(df["placement"], errors="coerce")
-		winner_mask = place_num == 1
-		df.loc[winner_mask, "last_active_week"] = 0
-		df.drop(columns=["placement"], inplace=True)
-
-	# 重新排列列顺序：season 第一列，index 第二列，last_active_week 第三列，其余保持原顺序
-	cols = list(df.columns)
-	remaining = [c for c in cols if c not in ["season", "index", "last_active_week"]]
-	df = df[["season", "index", "last_active_week"] + remaining]
 
 	# 写出到新的文件（相当于先复制为 data_new.csv 再进行修改）
 	df.to_csv(output_path, index=False)
