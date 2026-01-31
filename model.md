@@ -69,13 +69,16 @@ $$
 
 定义评委分数排名为：
 $$
-\text{rank}_J(i) \approx 1 + \sum_{j \neq i} \sigma(J_{s,j,t} - J_{s,i,t})
+\text{rank}_J(i) \approx 1 + \sum_{j \neq i} \sigma\left(\beta \cdot\frac{J_{s,j,t} - J_{s,i,t}}{\sum_{k \in \text{active}_t} J_{s,k,t}}\right)
 $$
+
 其中 $\sigma(x)$ 是sigmoid函数，$\sigma(x) \approx 1$ 如果 $x > 0$。
+
+参数 $\beta$ 控制评委分差对最终淘汰决策的影响，选取 $\beta=1$。
 
 类似地，大众投票排名为：
 $$
-\text{rank}_V(i) \approx 1 + \sum_{j \neq i} \sigma(V_{s,j,t} - V_{s,i,t})
+\text{rank}_V(i) \approx 1 + \sum_{j \neq i} \sigma(\beta (V_{s,j,t} - V_{s,i,t}))
 $$
 
 组合排名：
@@ -90,6 +93,30 @@ $$
 $$
 
 优化目标： $\min -\sum_{s,i,t} L_{s,i,t} \log(\mathbb{P}_{s,i,t})$。
+
+### **3.3 二次选择机制**
+
+对于Season 28-34，存在二次选择机制，分四种情况：
+
+1. 决赛周：无二次选择，直接使用上述排名法概率 $\mathbb{P}_{s,i,t}$。
+2. 非决赛周且淘汰1人：先使用排名法概率 $\mathbb{P}_{s,i,t}$ 选出“Bottom2”，再从中选出淘汰者。
+
+$$
+\mathbb{P}^{\text{final}}_{s,i,t} = \sum_{j \neq i} \mathbb{P}(i,j \in \text{Bottom2}) \cdot \mathbb{P}(\text{评委淘汰} i | i,j \in \text{Bottom2})
+$$
+
+$$
+\mathbb{P}(i,j \in \text{Bottom2}) = \mathbb{P}_{s,i,t} \cdot \frac{\mathbb{P}_{s,j,t}}{1-\mathbb{P}_{s,i,t}} + \mathbb{P}_{s,j,t} \cdot \frac{\mathbb{P}_{s,i,t}}{1-\mathbb{P}_{s,j,t}}
+$$
+
+$$
+\mathbb{P}(\text{评委淘汰} i | i,j \in \text{Bottom2}) = \sigma\left(\beta \cdot \frac{J_{j,t} - J_{i,t}}{\sum_{k \in \text{active}_t} J_{s,k,t}}\right)
+$$
+
+优化目标： $\min -\sum_{s,i,t} L_{s,i,t} \log(\mathbb{P}^{\text{final}}_{s,i,t})$。
+
+3. 非决赛周且淘汰2人：直接使用排名法概率 $\mathbb{P}_{s,i,t}$ 选出淘汰者。
+4. 非决赛周且淘汰0人：不计入损失函数。
 
 ---
 

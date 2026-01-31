@@ -38,6 +38,7 @@ class Event:
     J_norm: torch.Tensor  # shape [A]
     fans_norm: torch.Tensor  # shape [A]
     eliminated_mask: torch.Tensor  # shape [A], dtype=bool
+    is_final_week: bool  # 是否是该季最后一次发生淘汰的周
 
 
 def build_dataset(df: pd.DataFrame, weeks: int = 11) -> Tuple[List[Contestant], List[Event]]:
@@ -62,6 +63,14 @@ def build_dataset(df: pd.DataFrame, weeks: int = 11) -> Tuple[List[Contestant], 
         fans_norm_global = (fans_vals - fmin) / (fmax - fmin)
     else:
         fans_norm_global = np.zeros_like(fans_vals)
+
+    # 计算每季的“决赛周”（最后一次发生淘汰的周）
+    finals_week_map: Dict[int, int] = {}
+    for season in sorted(df["season"].dropna().astype(int).unique().tolist()):
+        lw = pd.to_numeric(df.loc[df["season"].astype(int) == season, "last_active_week"], errors="coerce")
+        lw = lw.dropna().astype(int)
+        lw = lw[lw > 0]
+        finals_week_map[season] = int(lw.max()) if not lw.empty else 0
 
     # Build events per season-week
     events: List[Event] = []
@@ -91,6 +100,7 @@ def build_dataset(df: pd.DataFrame, weeks: int = 11) -> Tuple[List[Contestant], 
             # eliminated mask from last_active_week
             last_w = pd.to_numeric(df.loc[active_rows, "last_active_week"], errors="coerce")
             eliminated_mask = (last_w.values.astype(float) == float(week))
+            is_final_week = (week == finals_week_map.get(season, 0))
             # If no elimination this week, still include event for gradients from method coupling
             # but loss will be zero for this event
             events.append(
@@ -102,6 +112,7 @@ def build_dataset(df: pd.DataFrame, weeks: int = 11) -> Tuple[List[Contestant], 
                     J_norm=torch.tensor(J_norm, dtype=torch.float32),
                     fans_norm=torch.tensor(fans_norm, dtype=torch.float32),
                     eliminated_mask=torch.tensor(eliminated_mask, dtype=torch.bool),
+                    is_final_week=is_final_week,
                 )
             )
     return contestants, events
@@ -117,6 +128,8 @@ class VotingModel(nn.Module):
         self.delta1_rank = nn.Parameter(torch.tensor(0.1))
         self.delta2_rank = nn.Parameter(torch.tensor(0.0))
         self.tau = 10.0
+        # 评委在 Bottom2 二次选择中的影响强度
+        self.beta = 1.0
 
     def forward_event(self, event: Event) -> torch.Tensor:
         # P = gamma + delta1 * J + delta2 * log(F)
@@ -144,13 +157,57 @@ class VotingModel(nn.Module):
             # rank approximation by pairwise sigmoid comparisons
             J_diff = event.J_norm.unsqueeze(0) - event.J_norm.unsqueeze(1)
             V_diff = V.unsqueeze(0) - V.unsqueeze(1)
-            sigma_J = torch.sigmoid(J_diff)
-            sigma_V = torch.sigmoid(V_diff)
+            # 引入 beta 因子，并按文档用 \sum J 进行归一化
+            J_sum = torch.clamp(event.J_norm.sum(), min=1e-8)
+            sigma_J = torch.sigmoid(self.beta * (J_diff / J_sum))
+            sigma_V = torch.sigmoid(self.beta * V_diff)
             # exclude self-comparisons by subtracting diagonal contribution (0.5)
             rank_J = 1.0 + (sigma_J.sum(dim=1) - torch.diag(sigma_J))
             rank_V = 1.0 + (sigma_V.sum(dim=1) - torch.diag(sigma_V))
             R_tilde = rank_J + rank_V
-            probs = torch.softmax(self.tau * R_tilde, dim=0)
+            # 默认排名法概率
+            probs_rank = torch.softmax(self.tau * R_tilde, dim=0)
+            # 二次选择机制：Season 28-34，非决赛周且淘汰人数为1
+            if (28 <= event.season <= 34) and (not event.is_final_week):
+                k = int(event.eliminated_mask.sum().item())
+                if k == 1:
+                    # 数值稳定版本：基于 probs_rank 计算 Bottom2 联合概率
+                    P = probs_rank
+                    eps = 1e-8
+                    P = torch.clamp(P, min=eps, max=1.0 - eps)
+                    sum_w = torch.tensor(1.0, dtype=P.dtype, device=P.device)
+                    A = P.shape[0]
+                    # 评委条件淘汰概率：sigma(beta * (J_j - J_i) / sum J)
+                    J_row = event.J_norm.view(-1, 1)  # [A,1]
+                    J_col = event.J_norm.view(1, -1)  # [1,A]
+                    judge_elim = torch.sigmoid(self.beta * ((J_col - J_row) / J_sum))  # [A,A]
+                    # 计算 P(i,j in Bottom2)
+                    # p_first(i) = P[i]; p_second_given_i(j) = P[j]/(1 - P[i])
+                    # 对称项相加（j 先、i 后）
+                    probs_final = torch.zeros_like(R_tilde)
+                    for i in range(A):
+                        Pi = P[i]
+                        denom_i = torch.clamp(1.0 - Pi, min=eps)
+                        p_first_i = Pi
+                        # i 作为第一个，j 作为第二个（剔除 i）
+                        p_second_given_i = P / denom_i  # [A]
+                        p_second_given_i[i] = 0.0
+                        term1 = p_first_i * p_second_given_i  # [A]
+                        # 对称项：j 作为第一个，i 作为第二个
+                        p_first_all = P.clone()  # [A]
+                        p_first_all[i] = 0.0
+                        denom_j = torch.clamp(1.0 - P, min=eps)  # [A]
+                        p_second_given_j_i = Pi / denom_j  # [A]
+                        p_second_given_j_i[i] = 0.0
+                        term2 = p_first_all * p_second_given_j_i  # [A]
+                        pair_prob = term1 + term2  # [A]
+                        # 累加淘汰 i 的最终概率：sum_{j != i} P_pair(i,j) * judge_elim[i,j]
+                        probs_final[i] = (pair_prob * judge_elim[i]).sum()
+                    probs = probs_final
+                else:
+                    probs = probs_rank
+            else:
+                probs = probs_rank
         return probs
 
 
