@@ -53,16 +53,10 @@ def build_dataset(df: pd.DataFrame, weeks: int = 11) -> Tuple[List[Contestant], 
         contestants.append(Contestant(season=s, index=idx, row_idx=r, name=name))
         id_map[(s, idx)] = gid
 
-    # Fans: 线性归一化（global min-max 到 [0,1]）
+    # Fans: 使用当周活跃选手的总和归一化（非负）
     fans_raw = pd.to_numeric(df.get("social_media_fans", pd.Series([np.nan] * len(df))), errors="coerce")
     fans_raw = fans_raw.fillna(0.0)
-    fans_vals = np.clip(fans_raw.values.astype(float), a_min=0.0, a_max=None)
-    fmin = float(np.min(fans_vals)) if fans_vals.size > 0 else 0.0
-    fmax = float(np.max(fans_vals)) if fans_vals.size > 0 else 1.0
-    if fmax > fmin:
-        fans_norm_global = (fans_vals - fmin) / (fmax - fmin)
-    else:
-        fans_norm_global = np.zeros_like(fans_vals)
+    fans_vals_all = np.clip(fans_raw.values.astype(float), a_min=0.0, a_max=None)
 
     # 计算每季的“决赛周”（最后一次发生淘汰的周）
     finals_week_map: Dict[int, int] = {}
@@ -87,16 +81,20 @@ def build_dataset(df: pd.DataFrame, weeks: int = 11) -> Tuple[List[Contestant], 
             if len(active_rows) == 0:
                 continue
             J_vals = J_series.loc[active_rows].values.astype(float)
-            # Min-max normalize to [0,1]
-            jmin = J_vals.min()
-            jmax = J_vals.max()
-            if jmax > jmin:
-                J_norm = (J_vals - jmin) / (jmax - jmin)
+            # 评委分按当周活跃选手的总和归一化
+            J_sum = float(np.sum(J_vals))
+            if J_sum > 0:
+                J_norm = (J_vals / J_sum)
             else:
                 J_norm = np.zeros_like(J_vals)
-            # fans for active
+            # 粉丝热度按当周活跃选手的总和归一化（非负）
             active_ids = [id_map[(season, int(df.loc[r, "index"]))] for r in active_rows]
-            fans_norm = fans_norm_global[[contestants[gid].row_idx for gid in active_ids]]
+            fans_active = fans_vals_all[[contestants[gid].row_idx for gid in active_ids]]
+            F_sum = float(np.sum(fans_active))
+            if F_sum > 0:
+                fans_norm = (fans_active / F_sum)
+            else:
+                fans_norm = np.zeros_like(fans_active)
             # eliminated mask from last_active_week
             last_w = pd.to_numeric(df.loc[active_rows, "last_active_week"], errors="coerce")
             eliminated_mask = (last_w.values.astype(float) == float(week))
@@ -127,12 +125,10 @@ class VotingModel(nn.Module):
         self.delta2_percent = nn.Parameter(torch.tensor(0.0))
         self.delta1_rank = nn.Parameter(torch.tensor(0.1))
         self.delta2_rank = nn.Parameter(torch.tensor(0.0))
-        self.tau = 10.0
-        # 评委在 Bottom2 二次选择中的影响强度
-        self.beta = 1.0
+        self.tau = 60.0
 
     def forward_event(self, event: Event) -> torch.Tensor:
-        # P = gamma + delta1 * J + delta2 * log(F)
+        # P = gamma + delta1 * J_norm + delta2 * F_norm；V 使用 softmax
         g = self.gamma[event.active_ids]
         if event.method == "percent":
             d1 = self.delta1_percent
@@ -141,13 +137,8 @@ class VotingModel(nn.Module):
             d1 = self.delta1_rank
             d2 = self.delta2_rank
         P = g + d1 * event.J_norm + d2 * event.fans_norm
-        # V 线性归一化：将 P 平移到非负后按和为1归一
-        P_shift = P - torch.min(P)
-        denom = torch.sum(P_shift)
-        if denom.item() > 1e-8:
-            V = P_shift / denom
-        else:
-            V = torch.full_like(P_shift, 1.0 / P_shift.numel())
+        # softmax 百分比（tau1=1）
+        V = torch.softmax(P, dim=0)
         if event.method == "percent":
             J_sum = torch.clamp(event.J_norm.sum(), min=1e-8)
             J_pct = event.J_norm / J_sum
@@ -159,8 +150,8 @@ class VotingModel(nn.Module):
             V_diff = V.unsqueeze(0) - V.unsqueeze(1)
             # 引入 beta 因子，并按文档用 \sum J 进行归一化
             J_sum = torch.clamp(event.J_norm.sum(), min=1e-8)
-            sigma_J = torch.sigmoid(self.beta * (J_diff / J_sum))
-            sigma_V = torch.sigmoid(self.beta * V_diff)
+            sigma_J = torch.sigmoid(J_diff / J_sum)
+            sigma_V = torch.sigmoid(V_diff)
             # exclude self-comparisons by subtracting diagonal contribution (0.5)
             rank_J = 1.0 + (sigma_J.sum(dim=1) - torch.diag(sigma_J))
             rank_V = 1.0 + (sigma_V.sum(dim=1) - torch.diag(sigma_V))
@@ -180,7 +171,7 @@ class VotingModel(nn.Module):
                     # 评委条件淘汰概率：sigma(beta * (J_j - J_i) / sum J)
                     J_row = event.J_norm.view(-1, 1)  # [A,1]
                     J_col = event.J_norm.view(1, -1)  # [1,A]
-                    judge_elim = torch.sigmoid(self.beta * ((J_col - J_row) / J_sum))  # [A,A]
+                    judge_elim = torch.sigmoid((J_col - J_row) / J_sum)  # [A,A]
                     # 计算 P(i,j in Bottom2)
                     # p_first(i) = P[i]; p_second_given_i(j) = P[j]/(1 - P[i])
                     # 对称项相加（j 先、i 后）
@@ -348,12 +339,7 @@ def compute_event_V(model: VotingModel, event: Event) -> torch.Tensor:
         d1 = model.delta1_rank
         d2 = model.delta2_rank
     P = g + d1 * event.J_norm + d2 * event.fans_norm
-    P_shift = P - torch.min(P)
-    denom = torch.sum(P_shift)
-    if denom.item() > 1e-8:
-        V = P_shift / denom
-    else:
-        V = torch.full_like(P_shift, 1.0 / P_shift.numel())
+    V = torch.softmax(P, dim=0)
     return V
 
 
@@ -363,19 +349,14 @@ def compute_rank_probs_with_two_stage(model: VotingModel, event: Event) -> torch
     d1 = model.delta1_rank
     d2 = model.delta2_rank
     P = g + d1 * event.J_norm + d2 * event.fans_norm
-    # V 线性归一化：hard min 再按和为1归一
-    P_shift = P - torch.min(P)
-    denom = torch.sum(P_shift)
-    if denom.item() > 1e-8:
-        V = P_shift / denom
-    else:
-        V = torch.full_like(P_shift, 1.0 / P_shift.numel())
+    # V 使用 softmax
+    V = torch.softmax(P, dim=0)
     # 排名近似
     J_diff = event.J_norm.unsqueeze(0) - event.J_norm.unsqueeze(1)
     V_diff = V.unsqueeze(0) - V.unsqueeze(1)
     J_sum = torch.clamp(event.J_norm.sum(), min=1e-8)
-    sigma_J = torch.sigmoid(model.beta * (J_diff / J_sum))
-    sigma_V = torch.sigmoid(model.beta * V_diff)
+    sigma_J = torch.sigmoid(J_diff / J_sum)
+    sigma_V = torch.sigmoid(V_diff)
     rank_J = 1.0 + (sigma_J.sum(dim=1) - torch.diag(sigma_J))
     rank_V = 1.0 + (sigma_V.sum(dim=1) - torch.diag(sigma_V))
     R_tilde = rank_J + rank_V
@@ -387,7 +368,7 @@ def compute_rank_probs_with_two_stage(model: VotingModel, event: Event) -> torch
         eps = 1e-8
         Pp = torch.clamp(Pp, min=eps, max=1.0 - eps)
         A = Pp.shape[0]
-        judge_elim = torch.sigmoid(model.beta * ((event.J_norm.view(1, -1) - event.J_norm.view(-1, 1)) / J_sum))
+        judge_elim = torch.sigmoid((event.J_norm.view(1, -1) - event.J_norm.view(-1, 1)) / J_sum)
         probs_final = torch.zeros_like(R_tilde)
         for i in range(A):
             Pi = Pp[i]
@@ -463,10 +444,10 @@ def sd_delta_method(model: VotingModel, events: List[Event], fisher_diag: Dict[s
     sd_map: Dict[Tuple[int, int], np.ndarray] = {}
     meanV_map: Dict[Tuple[int, int], np.ndarray] = {}
     for ev in events:
-        # 均值使用真实 V，梯度使用 softmin 的平滑 V 结合 autograd 计算
+        # 均值与梯度均使用 softmax 的 V
         V_true = compute_event_V(model, ev)
         meanV = V_true.detach().cpu().numpy()
-        # 构建 torch 计算图：softmin 平滑
+        # 构建 torch 计算图：softmax
         g = model.gamma[ev.active_ids]
         if ev.method == "percent":
             d1_param = model.delta1_percent
@@ -479,17 +460,13 @@ def sd_delta_method(model: VotingModel, events: List[Event], fisher_diag: Dict[s
             var_d1 = var_d1r
             var_d2 = var_d2r
         P = g + d1_param * ev.J_norm + d2_param * ev.fans_norm
-        alpha = torch.tensor(50.0, dtype=P.dtype, device=P.device)
-        m_soft = -(1.0/alpha) * torch.logsumexp(-alpha * P, dim=0)
-        P_shift = P - m_soft
-        denom = torch.sum(P_shift)
-        V_smooth = P_shift / torch.clamp(denom, min=eps)
+        V_soft = torch.softmax(P, dim=0)
         sd_vals = np.zeros_like(meanV)
         # Fisher 对角：转为 numpy 以做索引
         var_gamma_np = (1.0 / torch.clamp(fisher_diag["gamma"], min=eps)).detach().cpu().numpy()
         for a in range(len(ev.active_ids)):
             model.zero_grad()
-            grads = torch.autograd.grad(V_smooth[a], [model.gamma, d1_param, d2_param], retain_graph=True, allow_unused=True)
+            grads = torch.autograd.grad(V_soft[a], [model.gamma, d1_param, d2_param], retain_graph=True, allow_unused=True)
             # 提取 gamma 的梯度并限制到 active_ids
             grad_gamma_all = grads[0].detach().cpu().numpy() if grads[0] is not None else np.zeros_like(var_gamma_np)
             grad_gamma_active = grad_gamma_all[ev.active_ids]
@@ -529,13 +506,28 @@ def plot_sd_panels(df: pd.DataFrame, contestants: List[Contestant], events: List
     fig, axes = plt.subplots(rows_fig, cols, figsize=(cols * 3.2, rows_fig * 2.6), constrained_layout=False)
     axes = np.array(axes).reshape(rows_fig, cols)
 
-    vmax_global = 0.0
-    # 先扫描 vmax 用于统一色阶
+    # 统一色阶：按所有 SD 的 95% 分位作为上限，抑制极端值
+    all_vals: List[float] = []
     for ev in events:
         arr = sd_map.get((ev.season, ev.week))
-        if arr is not None:
-            vmax_global = max(vmax_global, float(np.nanmax(arr)))
-    vmax_global = vmax_global if np.isfinite(vmax_global) and vmax_global > 0 else 1.0
+        if arr is None:
+            continue
+        v = np.asarray(arr).ravel()
+        if v.size == 0:
+            continue
+        v = v[np.isfinite(v)]
+        if v.size:
+            all_vals.append(v)
+    if all_vals:
+        concat = np.concatenate(all_vals)
+        try:
+            vmax_global = float(np.percentile(concat, 95))
+        except Exception:
+            vmax_global = float(np.nanmax(concat)) if np.isfinite(np.nanmax(concat)) else 1.0
+        if not (np.isfinite(vmax_global) and vmax_global > 0):
+            vmax_global = 1.0
+    else:
+        vmax_global = 1.0
 
     for idx_s, s in enumerate(seasons):
         ax = axes[idx_s // cols][idx_s % cols]
@@ -987,16 +979,7 @@ def train(data_path: str, out_dir: str, epochs: int = 200, lr: float = 0.05, wee
                 plot_accuracy_grid(eval_res["per_season_squares"], best_grid_path)
                 print(f"best checkpoint saved: acc={best_acc:.4f}, params={best_params_path}, grid={best_grid_path}")
 
-    # Save artifacts
-    params = {
-        "delta1_percent": float(model.delta1_percent.item()),
-        "delta2_percent": float(model.delta2_percent.item()),
-        "delta1_rank": float(model.delta1_rank.item()),
-        "delta2_rank": float(model.delta2_rank.item()),
-        "gamma": {f"{c.season}-{c.index}-{c.name}": float(model.gamma[i].item()) for i, c in enumerate(contestants)},
-    }
-    with open(os.path.join(out_dir, "params.json"), "w", encoding="utf-8") as f:
-        json.dump(params, f, ensure_ascii=False, indent=2)
+    # 不再保存最终 params.json（仅保存 best）
 
     # Optionally dump per-event predicted elimination probabilities
     rows = []
@@ -1027,7 +1010,7 @@ def train(data_path: str, out_dir: str, epochs: int = 200, lr: float = 0.05, wee
     }
     with open(os.path.join(out_dir, "metrics.json"), "w", encoding="utf-8") as f:
         json.dump(metrics, f, ensure_ascii=False, indent=2)
-    plot_accuracy_grid(eval_final["per_season_squares"], os.path.join(out_dir, "accuracy_grid.png"))
+    # 不再保存最终 accuracy_grid.png（仅保存 best）
 
     print(f"训练完成。参数与输出保存在 {out_dir}")
     print(
@@ -1087,7 +1070,7 @@ def main():
     parser.add_argument("--out", default="artifacts", help="输出目录")
     parser.add_argument("--mode", choices=["train", "infer"], default="train", help="运行模式：train 或 infer")
     parser.add_argument("--best", default="artifacts/best_params.json", help="infer 模式下读取的 best 参数路径")
-    parser.add_argument("--epochs", type=int, default=300, help="训练轮数")
+    parser.add_argument("--epochs", type=int, default=50, help="训练轮数")
     parser.add_argument("--lr", type=float, default=0.05, help="学习率")
     parser.add_argument("--weeks", type=int, default=11, help="最大周数")
     parser.add_argument("--samples", type=int, default=200, help="infer 模式下蒙特卡洛样本数")

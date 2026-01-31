@@ -4,8 +4,8 @@
 对于每季 $s=1,2,\dots,34$：
 - 参赛者集合：$i = 1, \dots, N_s$
 - 周次：$t = 1, \dots, T_{s,i}$（直到该选手被淘汰）
-- $J_{s,i,t}$：第 $s$ 季第 $t$ 周专业评审给选手 $i$ 的平均打分（标准化到 0-1 之间）
-- $F_{s,i}$：选手 $i$ 在赛季 $s$ 时的社交媒体粉丝数（取对数后标准化）
+- $J_{s,i,t}$：第 $s$ 季第 $t$ 周专业评审给选手 $i$ 的平均打分
+- $F_{s,i}$：选手 $i$ 在赛季 $s$ 时的 Google Trends 热度分数
 - $L_{s,i,t}$：第 $s$ 季选手 $i$ 是否在恰好在第 $t$ 周被淘汰（1 表示被淘汰，0 表示未被淘汰）
 
 ### **1.2 未知目标**
@@ -21,23 +21,24 @@
 1. 每周淘汰结果由 **（评委分，大众投票）** 按某种**已知规则**（排名法或百分比法）组合决定
 2. 大众投票受两个因素影响：
    - **当前表现**：评委打分 $J_{s,i,t}$ 反映的客观质量
-   - **固有流行度**：粉丝数 $F_{s,i}$ 反映的人气基础
+   - **固有流行度**：Google Trends 热度分数 $F_{s,i}$ 反映的人气基础
 
 ### **2.2 数学模型框架**
 我们采用**贝叶斯潜在变量模型**，结构如下：
 
 $$
 \begin{aligned}
-\text{大众投票倾向} &: \quad P_{s,i,t} = \gamma_{s,i} + \delta_1 J_{s,i,t} + \delta_2 F_{s,i} \\
- 	{大众投票百分比} &: \quad \tilde{P}_{s,i,t} = P_{s,i,t} - \min_{j \in \text{active}_t} P_{s,j,t} \\
- & \quad V_{s,i,t} = \frac{\tilde{P}_{s,i,t}}{\sum_{j \in \text{active}_t} \tilde{P}_{s,j,t}} \quad (\text{若分母为 }0, \text{则取均匀分配})
+\text{大众投票倾向} &: \quad P_{s,i,t} = \gamma_{s,i} + \delta_1 \frac{J_{s,i,t}}{\sum_{j \in \text{active}_t} J_{s,j,t}} + \delta_2 \frac{F_{s,i}}{\sum_{j \in \text{active}_t} F_{s,j}} \\
+ 	{大众投票百分比} &: \quad V_{s,i,t} = \frac{\exp(P_{s,i,t})}{\sum_{j \in \text{active}_t} \exp(P_{s,j,t})} 
 \end{aligned}
 $$
 
 其中：
 - $\gamma_{s,i}$：选手个体随机效应
 - $\delta_1$：评委打分对实力/投票的影响系数
-- $\delta_2$：粉丝数对实力/投票的影响系数
+- $\delta_2$：Google Trends 热度分数对实力/投票的影响系数
+
+我们假设，$\delta_1,\delta_2$ 在采用相同规则的所有赛季中共享，但在排名法和百分比法的赛季中不共享，即 $\delta_1^{\text{rank}}, \delta_2^{\text{rank}}$ 与 $\delta_1^{\text{percent}}, \delta_2^{\text{percent}}$ 分别独立估计。
 
 ---
 
@@ -48,7 +49,7 @@ $$
 对于每周 $t$，对于使用**百分比法**的季节（Season 3-27），记组合分为 $C_{s,i,t}$：
 
 $$
-C_{s,i,t} = \underbrace{\frac{J_{s,i,t}}{\sum_j J_{s,j,t}}}_{\text{评委百分比}} + \underbrace{V_{s,i,t}}_{\text{大众投票百分比}}
+C_{s,i,t} = \underbrace{\frac{J_{s,i,t}}{\sum_{j \in \text{active}_t} J_{s,j,t}}}_{\text{评委百分比}} + \underbrace{V_{s,i,t}}_{\text{大众投票百分比}}
 $$
 
 使用 **softmax** 将硬决策转化为软概率：
@@ -57,7 +58,7 @@ $$
 \mathbb{P}_{s,i,t} = \frac{\exp(-\tau \cdot C_{s,i,t})}{\sum_{j \in \text{active}_t} \exp(-\tau \cdot C_{s,j,t})}
 $$
 
-其中 $\tau \to \infty$ 时恢复硬决策。实际中取 $\tau=10$ 足够大。
+其中 $\tau \to \infty$ 时恢复硬决策。实际中取 $\tau=60$ 足够大。
 
 淘汰者：若有 $k$ 名选手在第 $s$ 季第 $t$ 周被淘汰，则取 $\mathbb{P}_{s,i,t}$ 最高的 $k$ 名选手。
 
@@ -69,16 +70,14 @@ $$
 
 定义评委分数排名为：
 $$
-\text{rank}_J(i) \approx 1 + \sum_{j \neq i} \sigma\left(\beta \cdot\frac{J_{s,j,t} - J_{s,i,t}}{\sum_{k \in \text{active}_t} J_{s,k,t}}\right)
+\text{rank}_J(i) \approx 1 + \sum_{j \neq i} \sigma\left(\frac{J_{s,j,t} - J_{s,i,t}}{\sum_{k \in \text{active}_t} J_{s,k,t}}\right)
 $$
 
 其中 $\sigma(x)$ 是sigmoid函数，$\sigma(x) \approx 1$ 如果 $x > 0$。
 
-参数 $\beta$ 控制评委分差对最终淘汰决策的影响，选取 $\beta=1$。
-
 类似地，大众投票排名为：
 $$
-\text{rank}_V(i) \approx 1 + \sum_{j \neq i} \sigma(\beta (V_{s,j,t} - V_{s,i,t}))
+\text{rank}_V(i) \approx 1 + \sum_{j \neq i} \sigma(V_{s,j,t} - V_{s,i,t})
 $$
 
 组合排名：
@@ -91,6 +90,8 @@ $$
 $$
 \mathbb{P}_{s,i,t} = \frac{\exp(\tau \cdot \tilde{R}_{s,i,t})}{\sum_{j \in \text{active}_t} \exp(\tau \cdot \tilde{R}_{s,j,t})}
 $$
+
+淘汰者：若有 $k$ 名选手在第 $s$ 季第 $t$ 周被淘汰，则取 $\mathbb{P}_{s,i,t}$ 最高的 $k$ 名选手。
 
 优化目标： $\min -\sum_{s,i,t} L_{s,i,t} \log(\mathbb{P}_{s,i,t})$。
 
@@ -110,8 +111,10 @@ $$
 $$
 
 $$
-\mathbb{P}(\text{评委淘汰} i | i,j \in \text{Bottom2}) = \sigma\left(\beta \cdot \frac{J_{j,t} - J_{i,t}}{\sum_{k \in \text{active}_t} J_{s,k,t}}\right)
+\mathbb{P}(\text{评委淘汰} i | i,j \in \text{Bottom2}) = \sigma\left( \frac{J_{j,t} - J_{i,t}}{\sum_{k \in \text{active}_t} J_{s,k,t}}\right)
 $$
+
+淘汰者：取 $\mathbb{P}^{\text{final}}_{s,i,t}$ 最高的选手。
 
 优化目标： $\min -\sum_{s,i,t} L_{s,i,t} \log(\mathbb{P}^{\text{final}}_{s,i,t})$。
 
@@ -137,40 +140,29 @@ $$
 $$
 \theta = \begin{bmatrix}
 \gamma_{1,1} \\ \vdots \\ \gamma_{S,N_S} \\
-\delta_1 \\
-\delta_2
+\delta_1^{\text{rank}} \\
+\delta_2^{\text{rank}} \\
+\delta_1^{\text{percent}} \\
+\delta_2^{\text{percent}}
 \end{bmatrix}
 \in \mathbb{R}^{M}
 $$
-其中 $M = \sum_{s=1}^{34} N_s + 2$。
-
+其中 $M = \sum_{s=1}^{34} N_s + 4$。
 $$
-P_{s,i,t} = \gamma_{s,i} + \delta_1 J_{s,i,t} + \delta_2 F_{s,i}
+P_{s,i,t} = \gamma_{s,i} + \delta_1 \frac{J_{s,i,t}}{\sum_{j \in \text{active}_t} J_{s,j,t}} + \delta_2\frac{F_{s,i}}{\sum_{j \in \text{active}_t} F_{s,j}}
 $$
 
 梯度为：
 $$
 \nabla_\theta P_{s,i,t} = \begin{cases}
 1 & \text{对应 } \gamma_{s,i} \\
-J_{s,i,t} & \text{对应 } \delta_1 \\
-F_{s,i} & \text{对应 } \delta_2 \\
-0 & \text{其他}
+\frac{J_{s,i,t}}{\sum_{j \in \text{active}_t} J_{s,j,t}} & \text{对应 } \delta_1 \\
+\frac{F_{s,i}}{\sum_{j \in \text{active}_t} F_{s,j}} & \text{对应 } \delta_2
 \end{cases}
 $$
 
 $$
-\tilde{P}_{s,i,t} = P_{s,i,t} - \min_{j \in A_t} P_{s,j,t}
-$$
-其中 $A_t$ 是第 $t$ 周活跃选手集合。
-
-为保证可导与数值稳定，采用 softmin 平滑最小值：
-$$
- m_{\text{soft}}(P) = -\frac{1}{\alpha} \log \sum_{j \in A_t} e^{-\alpha P_{s,j,t}}, \quad \alpha = 50
-$$
-并令 $\tilde{P}_{s,i,t} = P_{s,i,t} - m_{\text{soft}}(P)$ 进入梯度与 Delta 方法的方差计算。
-
-$$
-V_{s,i,t} = \frac{\tilde{P}_{s,i,t}}{S_t}, \quad S_t = \sum_{j \in A_t} \tilde{P}_{s,j,t}
+V_{s,i,t} = \frac{\exp(P_{s,i,t})}{\sum_{j \in \text{active}_t} \exp(P_{s,j,t})} = \frac{\tilde{P}_{s,i,t}}{S_t}
 $$
 
 使用商法则：

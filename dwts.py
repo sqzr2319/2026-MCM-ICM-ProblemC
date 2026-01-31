@@ -11,25 +11,39 @@ DWTS_COL = "Dancing with the Stars"
 
 
 def process_file(file_path: str) -> pd.Series:
-    """Process a single trends CSV:
-    1) Divide all non-DWTS columns row-wise by DWTS column value
-    2) Sum each column and return a single-row Series (column sums)
-    Returns: pd.Series where index=column names, values=sums
+    """处理单个季节的趋势 CSV：
+    1) 先对每一列进行纵向求和（跨所有行）
+    2) 再将所有非 DWTS 列的列和除以 DWTS 列的列和
+    返回：索引为名人列名、值为（该列和 / DWTS 列和）的 Series（不包含 DWTS 列）
     """
     df = pd.read_csv(file_path, dtype=str)
     if DWTS_COL not in df.columns:
-        # No DWTS column, skip by returning empty
+        # 缺少 DWTS 列，返回空
         return pd.Series(dtype=float)
 
-    # Coerce all to numeric
+    # 转为数值
     num = df.apply(pd.to_numeric, errors="coerce")
-    denom = num[DWTS_COL].replace(0, np.nan)
-    # Divide each non-DWTS column by denom per row
-    other_cols = [c for c in num.columns if c != DWTS_COL]
-    num[other_cols] = num[other_cols].div(denom, axis=0)
-    # Column sums
+    # 计算列和（跨所有行）
     col_sums = num.sum(axis=0, skipna=True)
-    return col_sums
+    # DWTS 的总和作为分母
+    try:
+        denom_total = float(col_sums.get(DWTS_COL, np.nan))
+    except Exception:
+        denom_total = np.nan
+
+    # 分母不可用或为 0 则跳过
+    if not np.isfinite(denom_total) or denom_total == 0.0:
+        return pd.Series(dtype=float)
+
+    # 对每个非 DWTS 列：列和 / DWTS 列和
+    ratio_items = {}
+    for c in num.columns:
+        if c == DWTS_COL:
+            continue
+        val = col_sums.get(c, np.nan)
+        if np.isfinite(val):
+            ratio_items[c] = float(val) / denom_total
+    return pd.Series(ratio_items, dtype=float)
 
 
 def parse_season_from_filename(fname: str) -> int:
