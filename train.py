@@ -784,9 +784,18 @@ def boxplot_gamma_by_category(df: pd.DataFrame, contestants: List[Contestant], m
         row = c.row_idx
         if row < 0 or row >= len(df):
             continue
-        key = str(df.loc[row, column]) if column in df.columns else None
-        if key is None or pd.isna(key):
-            key = "(Unknown)"
+        # 提取原始值并统一处理缺失/空白/'nan'
+        val_raw = df.loc[row, column] if column in df.columns else None
+        key: str
+        if (
+            val_raw is None
+            or (isinstance(val_raw, float) and np.isnan(val_raw))
+            or (isinstance(val_raw, str) and (val_raw.strip() == "" or val_raw.strip().lower() == "nan"))
+        ):
+            # homestate 的空值统一标记为 non-america
+            key = "non-america" if column == "celebrity_homestate" else "(Unknown)"
+        else:
+            key = str(val_raw)
         val = float(model.gamma[i].item())
         groups.setdefault(key, []).append(val)
     # 过滤最少样本
