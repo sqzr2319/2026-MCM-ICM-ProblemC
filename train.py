@@ -270,10 +270,14 @@ def evaluate_model(model: nn.Module, events: List[Event], contestants: List[Cont
 
 
 def plot_accuracy_grid(per_season_squares: Dict[int, List[Dict]], out_path: str):
+    # 两列布局：将赛季分为左右两列，每列最多 ~17 行，避免整图过长
     if plt is None:
         print("未安装 matplotlib，跳过绘图。")
         return
     seasons = sorted(per_season_squares.keys())
+    if not seasons:
+        print("没有可绘制的数据。")
+        return
     # 每行的列数取该季的参赛人数（淘汰人数 + 1 冠军）
     row_lengths = {s: len(per_season_squares[s]) for s in seasons}
     max_len = max(row_lengths.values()) if row_lengths else 0
@@ -281,25 +285,41 @@ def plot_accuracy_grid(per_season_squares: Dict[int, List[Dict]], out_path: str)
         print("没有可绘制的数据。")
         return
 
-    fig_w = max_len * 0.35 + 2
-    fig_h = len(seasons) * 0.35 + 2
-    fig, ax = plt.subplots(figsize=(fig_w, fig_h))
-    ax.set_xlim(0, max_len)
-    ax.set_ylim(0, len(seasons))
-    ax.set_aspect('equal')
-    ax.axis('off')
+    # 划分两列
+    n = len(seasons)
+    rows_per_col = int(np.ceil(n / 2))
+    left_seasons = seasons[:rows_per_col]
+    right_seasons = seasons[rows_per_col:]
 
-    for row_idx, s in enumerate(seasons):
-        # 按 week 升序排，冠军放最后（week 已是最后周+1）
-        cells = sorted(per_season_squares[s], key=lambda d: (d["week"], 0 if d["is_champion"] else -1))
-        for col_idx, cell in enumerate(cells):
-            color = '#4CAF50' if cell["correct"] else '#F44336'
-            rect = plt.Rectangle((col_idx, len(seasons)-1-row_idx), 0.9, 0.9, facecolor=color, edgecolor='black', linewidth=0.5)
-            ax.add_patch(rect)
-            label = f"Wk {cell['week']}" if not cell["is_champion"] else "Champ"
-            ax.text(col_idx+0.45, len(seasons)-1-row_idx+0.45, label, ha='center', va='center', fontsize=6, color='white')
-        # 标注赛季号
-        ax.text(-0.5, len(seasons)-1-row_idx+0.45, f"S{s}", ha='right', va='center', fontsize=8)
+    # 画布大小：两列并排，行高按每列行数决定
+    fig_w = 2 * (max_len * 0.35 + 2.0)
+    fig_h = rows_per_col * 0.35 + 2.0
+    fig, axes = plt.subplots(1, 2, figsize=(fig_w, fig_h))
+    axes = np.array(axes).reshape(1, 2)
+
+    def draw_column(ax, seasons_col: List[int]):
+        ax.set_xlim(0, max_len)
+        ax.set_ylim(0, len(seasons_col))
+        ax.set_aspect('equal')
+        ax.axis('off')
+        for row_idx, s in enumerate(seasons_col):
+            # 按 week 升序排，冠军放最后（week 已是最后周+1）
+            cells = sorted(per_season_squares[s], key=lambda d: (d["week"], 0 if d["is_champion"] else -1))
+            for col_idx, cell in enumerate(cells):
+                color = '#4CAF50' if cell["correct"] else '#F44336'
+                rect = plt.Rectangle((col_idx, len(seasons_col)-1-row_idx), 0.9, 0.9, facecolor=color, edgecolor='black', linewidth=0.5)
+                ax.add_patch(rect)
+                label = f"Wk {cell['week']}" if not cell["is_champion"] else "Champ"
+                ax.text(col_idx+0.45, len(seasons_col)-1-row_idx+0.45, label, ha='center', va='center', fontsize=6, color='white')
+            # 标注赛季号
+            ax.text(-0.5, len(seasons_col)-1-row_idx+0.45, f"S{s}", ha='right', va='center', fontsize=8)
+
+    draw_column(axes[0][0], left_seasons)
+    # 右列可能为空（当季数 <= rows_per_col）
+    if right_seasons:
+        draw_column(axes[0][1], right_seasons)
+    else:
+        axes[0][1].axis('off')
 
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
     plt.tight_layout()
