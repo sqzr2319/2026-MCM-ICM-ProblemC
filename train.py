@@ -432,14 +432,16 @@ def compute_fisher_diag(model: VotingModel, events: List[Event]) -> Dict[str, to
     }
 
 
-def sd_delta_method(model: VotingModel, events: List[Event], fisher_diag: Dict[str, torch.Tensor]):
+def sd_delta_method(model: VotingModel, events: List[Event], fisher_diag: Dict[str, torch.Tensor], damp: float = 0.0):
     # 使用 Delta 方法：Var(V_a) ≈ sum_j (∂V_a/∂θ_j)^2 Var(θ_j)，SD = sqrt(Var)
     eps = 1e-12
-    var_gamma = 1.0 / torch.clamp(fisher_diag["gamma"], min=eps)
-    var_d1p = float((1.0 / torch.clamp(fisher_diag["d1p"], min=eps)).item())
-    var_d2p = float((1.0 / torch.clamp(fisher_diag["d2p"], min=eps)).item())
-    var_d1r = float((1.0 / torch.clamp(fisher_diag["d1r"], min=eps)).item())
-    var_d2r = float((1.0 / torch.clamp(fisher_diag["d2r"], min=eps)).item())
+    # 阻尼逆协方差：(H + λI)^{-1}，在对角近似下等价为 1/(Fisher_diag + λ)
+    lam = float(max(damp, 0.0))
+    var_gamma = 1.0 / (torch.clamp(fisher_diag["gamma"], min=eps) + lam)
+    var_d1p = float((1.0 / (torch.clamp(fisher_diag["d1p"], min=eps) + lam)).item())
+    var_d2p = float((1.0 / (torch.clamp(fisher_diag["d2p"], min=eps) + lam)).item())
+    var_d1r = float((1.0 / (torch.clamp(fisher_diag["d1r"], min=eps) + lam)).item())
+    var_d2r = float((1.0 / (torch.clamp(fisher_diag["d2r"], min=eps) + lam)).item())
 
     sd_map: Dict[Tuple[int, int], np.ndarray] = {}
     meanV_map: Dict[Tuple[int, int], np.ndarray] = {}
@@ -463,7 +465,7 @@ def sd_delta_method(model: VotingModel, events: List[Event], fisher_diag: Dict[s
         V_soft = torch.softmax(P, dim=0)
         sd_vals = np.zeros_like(meanV)
         # Fisher 对角：转为 numpy 以做索引
-        var_gamma_np = (1.0 / torch.clamp(fisher_diag["gamma"], min=eps)).detach().cpu().numpy()
+        var_gamma_np = (1.0 / (torch.clamp(fisher_diag["gamma"], min=eps) + lam)).detach().cpu().numpy()
         for a in range(len(ev.active_ids)):
             model.zero_grad()
             grads = torch.autograd.grad(V_soft[a], [model.gamma, d1_param, d2_param], retain_graph=True, allow_unused=True)
@@ -521,7 +523,7 @@ def plot_sd_panels(df: pd.DataFrame, contestants: List[Contestant], events: List
     if all_vals:
         concat = np.concatenate(all_vals)
         try:
-            vmax_global = float(np.percentile(concat, 95))
+            vmax_global = float(np.percentile(concat, 99))
         except Exception:
             vmax_global = float(np.nanmax(concat)) if np.isfinite(np.nanmax(concat)) else 1.0
         if not (np.isfinite(vmax_global) and vmax_global > 0):
@@ -1018,7 +1020,7 @@ def train(data_path: str, out_dir: str, epochs: int = 200, lr: float = 0.05, wee
     )
 
 
-def infer(data_path: str, best_path: str, out_dir: str, weeks: int = 11, samples: int = 200):
+def infer(data_path: str, best_path: str, out_dir: str, weeks: int = 11, damp: float = 0.0):
     df = pd.read_csv(data_path, dtype=str)
     df["season"] = pd.to_numeric(df["season"], errors="coerce")
     df["index"] = pd.to_numeric(df["index"], errors="coerce")
@@ -1033,7 +1035,7 @@ def infer(data_path: str, best_path: str, out_dir: str, weeks: int = 11, samples
     # Fisher 对角近似
     fisher_diag = compute_fisher_diag(model, events)
     # 使用 Delta 方法计算 SD 与 mean(V)
-    sd_map, meanV_map = sd_delta_method(model, events, fisher_diag)
+    sd_map, meanV_map = sd_delta_method(model, events, fisher_diag, damp=damp)
     # 输出 SD 面板图与 mean(V) 面板图，附带色阶
     os.makedirs(out_dir, exist_ok=True)
     plot_sd_panels(df, contestants, events, sd_map, os.path.join(out_dir, "sd_panels.png"))
@@ -1073,14 +1075,14 @@ def main():
     parser.add_argument("--epochs", type=int, default=50, help="训练轮数")
     parser.add_argument("--lr", type=float, default=0.05, help="学习率")
     parser.add_argument("--weeks", type=int, default=11, help="最大周数")
-    parser.add_argument("--samples", type=int, default=200, help="infer 模式下蒙特卡洛样本数")
+    parser.add_argument("--damp", type=float, default=1e-1, help="SD 计算的阻尼 λ (damping) 用于稳定协方差")
     args = parser.parse_args()
     if args.mode == "train":
         train(args.data, args.out, epochs=args.epochs, lr=args.lr, weeks=args.weeks)
     else:
         # 推理输出不要与 artifacts 混放，使用单独目录
         infer_out = args.out if args.out != "artifacts" else os.path.join("analysis")
-        infer(args.data, args.best, out_dir=infer_out, weeks=args.weeks, samples=args.samples)
+        infer(args.data, args.best, out_dir=infer_out, weeks=args.weeks, damp=args.damp)
 
 
 if __name__ == "__main__":

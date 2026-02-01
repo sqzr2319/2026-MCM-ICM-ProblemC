@@ -178,9 +178,10 @@ $$
 接下来我们需要参数协方差矩阵 $\Sigma_\theta$：
 
 $$
-\Sigma_\theta = -\left[\nabla^2 \mathcal{L}(\hat{\theta})\right]^{-1}
+\Sigma_\theta = \left[-\nabla^2 \mathcal{L}(\hat{\theta})+\lambda I\right]^{-1}
 $$
-其中 $\nabla^2 \mathcal{L}(\hat{\theta})$ 是**对数似然函数在最优参数 $\hat{\theta}$ 处的Hessian矩阵**。
+
+其中 $\nabla^2 \mathcal{L}(\hat{\theta})$ 是**对数似然函数在最优参数 $\hat{\theta}$ 处的Hessian矩阵**，$\lambda$ 是一个小的正数，用于数值稳定性。
 
 对于你的模型，对数似然为：
 $$
