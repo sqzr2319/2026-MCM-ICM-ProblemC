@@ -1069,6 +1069,23 @@ def infer(data_path: str, best_path: str, out_dir: str, weeks: int = 11, damp: f
     os.makedirs(out_dir, exist_ok=True)
     plot_sd_panels(df, contestants, events, sd_map, os.path.join(out_dir, "sd_panels.png"))
     plot_meanV_panels(df, contestants, events, meanV_map, os.path.join(out_dir, "meanV_panels.png"))
+    # 导出 mean(V) 到 JSON：逐季逐周逐选手
+    meanV_rows = []
+    for ev in events:
+        meanV = meanV_map.get((ev.season, ev.week))
+        if meanV is None:
+            continue
+        for k, gid in enumerate(ev.active_ids):
+            c = contestants[gid]
+            meanV_rows.append({
+                "season": int(ev.season),
+                "week": int(ev.week),
+                "contestant_index": int(c.index),
+                "name": c.name,
+                "V": float(meanV[k])
+            })
+    with open(os.path.join(out_dir, "meanV.json"), "w", encoding="utf-8") as f:
+        json.dump(meanV_rows, f, ensure_ascii=False, indent=2)
     # 一致性检验：三组两两一致率 + 三张栅格图
     rates, sq_rp, sq_rv, sq_pv = build_consistency_data(model, events)
     with open(os.path.join(out_dir, "consistency.json"), "w", encoding="utf-8") as f:
