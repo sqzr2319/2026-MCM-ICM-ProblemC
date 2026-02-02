@@ -327,6 +327,42 @@ def plot_accuracy_grid(per_season_squares: Dict[int, List[Dict]], out_path: str)
     plt.close(fig)
 
 
+def plot_accuracy_grid_single_column(per_season_squares: Dict[int, List[Dict]], out_path: str):
+    # 单列 34 行布局，用于一致性图
+    if plt is None:
+        print("未安装 matplotlib，跳过绘图。")
+        return
+    seasons = sorted(per_season_squares.keys())
+    row_lengths = {s: len(per_season_squares[s]) for s in seasons}
+    max_len = max(row_lengths.values()) if row_lengths else 0
+    if max_len == 0:
+        print("没有可绘制的数据。")
+        return
+
+    fig_w = max_len * 0.35 + 2
+    fig_h = len(seasons) * 0.35 + 2
+    fig, ax = plt.subplots(figsize=(fig_w, fig_h))
+    ax.set_xlim(0, max_len)
+    ax.set_ylim(0, len(seasons))
+    ax.set_aspect('equal')
+    ax.axis('off')
+
+    for row_idx, s in enumerate(seasons):
+        cells = sorted(per_season_squares[s], key=lambda d: (d["week"], 0 if d["is_champion"] else -1))
+        for col_idx, cell in enumerate(cells):
+            color = '#4CAF50' if cell["correct"] else '#F44336'
+            rect = plt.Rectangle((col_idx, len(seasons)-1-row_idx), 0.9, 0.9, facecolor=color, edgecolor='black', linewidth=0.5)
+            ax.add_patch(rect)
+            label = f"Wk {cell['week']}" if not cell["is_champion"] else "Champ"
+            ax.text(col_idx+0.45, len(seasons)-1-row_idx+0.45, label, ha='center', va='center', fontsize=6, color='white')
+        ax.text(-0.5, len(seasons)-1-row_idx+0.45, f"S{s}", ha='right', va='center', fontsize=8)
+
+    os.makedirs(os.path.dirname(out_path), exist_ok=True)
+    plt.tight_layout()
+    plt.savefig(out_path, dpi=200)
+    plt.close(fig)
+
+
 def set_model_params_from_best(model: VotingModel, contestants: List[Contestant], best_params: Dict):
     # 支持旧/新键名：若不存在 percent/rank 专用参数，退化为共享
     d1p = best_params.get("delta1_percent", best_params.get("delta1", 0.1))
@@ -407,6 +443,24 @@ def compute_rank_probs_with_two_stage(model: VotingModel, event: Event) -> torch
         return probs_final
     else:
         return probs_rank
+
+def compute_rank_probs_pure(model: VotingModel, event: Event) -> torch.Tensor:
+    # 纯排名法概率（不含二次选择），用于一致性比较
+    g = model.gamma[event.active_ids]
+    d1 = model.delta1_rank
+    d2 = model.delta2_rank
+    P = g + d1 * event.J_norm + d2 * event.fans_norm
+    V = torch.softmax(P, dim=0)
+    J_diff = event.J_norm.unsqueeze(0) - event.J_norm.unsqueeze(1)
+    V_diff = V.unsqueeze(0) - V.unsqueeze(1)
+    J_sum = torch.clamp(event.J_norm.sum(), min=1e-8)
+    sigma_J = torch.sigmoid(J_diff / J_sum)
+    sigma_V = torch.sigmoid(V_diff)
+    rank_J = 1.0 + (sigma_J.sum(dim=1) - torch.diag(sigma_J))
+    rank_V = 1.0 + (sigma_V.sum(dim=1) - torch.diag(sigma_V))
+    R_tilde = rank_J + rank_V
+    probs_rank = torch.softmax(model.tau * R_tilde, dim=0)
+    return probs_rank
 
 
 def compute_fisher_diag(model: VotingModel, events: List[Event]) -> Dict[str, torch.Tensor]:
@@ -686,9 +740,9 @@ def build_consistency_data(model: VotingModel, events: List[Event]):
             continue
         totals += 1
         ev_percent = Event(ev.season, ev.week, "percent", ev.active_ids, ev.J_norm, ev.fans_norm, ev.eliminated_mask, ev.is_final_week)
-        ev_rank = Event(ev.season, ev.week, "rank", ev.active_ids, ev.J_norm, ev.fans_norm, ev.eliminated_mask, ev.is_final_week)
+        # 使用纯排名法（不含二次选择）用于一致性比较
+        probs_r = compute_rank_probs_pure(model, ev).detach().cpu().numpy()
         probs_p = model.forward_event(ev_percent).detach().cpu().numpy()
-        probs_r = model.forward_event(ev_rank).detach().cpu().numpy()
         V = compute_event_V(model, ev).detach().cpu().numpy()
         set_p = set(np.argsort(-probs_p)[:k].tolist())
         set_r = set(np.argsort(-probs_r)[:k].tolist())
@@ -1090,9 +1144,10 @@ def infer(data_path: str, best_path: str, out_dir: str, weeks: int = 11, damp: f
     rates, sq_rp, sq_rv, sq_pv = build_consistency_data(model, events)
     with open(os.path.join(out_dir, "consistency.json"), "w", encoding="utf-8") as f:
         json.dump(rates, f, ensure_ascii=False, indent=2)
-    plot_accuracy_grid(sq_rp, os.path.join(out_dir, "consistency_rank_vs_percent.png"))
-    plot_accuracy_grid(sq_rv, os.path.join(out_dir, "consistency_rank_vs_pureV.png"))
-    plot_accuracy_grid(sq_pv, os.path.join(out_dir, "consistency_percent_vs_pureV.png"))
+    # 一致性图改为单列34行布局
+    plot_accuracy_grid_single_column(sq_rp, os.path.join(out_dir, "consistency_rank_vs_percent.png"))
+    plot_accuracy_grid_single_column(sq_rv, os.path.join(out_dir, "consistency_rank_vs_pureV.png"))
+    plot_accuracy_grid_single_column(sq_pv, os.path.join(out_dir, "consistency_percent_vs_pureV.png"))
     # 回归与箱线图
     # 已删除不需要的 mean(V)~fans 回归散点与 SD 周度箱线图
     # 名人特征分析（第7节）：基于训练好的 gamma 进行年龄回归与分类箱线图
