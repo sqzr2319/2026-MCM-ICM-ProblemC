@@ -793,6 +793,44 @@ def build_consistency_data(model: VotingModel, events: List[Event]):
 # 已移除：mean(V)~fans 散点与每周 SD 箱线图（不再需要）
 
 
+def build_consistency_twostage_vs_rankpure(model: VotingModel, events: List[Event]):
+    # 计算“全季二次选择排名法”与“纯排名法”的一致率，并构建逐季的方格数据
+    rate_key = "rank_twostage_vs_rankpure"
+    count_equal = 0
+    totals = 0
+    squares_ts_vs_r: Dict[int, List[Dict]] = {}
+
+    for ev in events:
+        actual_mask = ev.eliminated_mask.detach().cpu().numpy()
+        k = int(actual_mask.sum())
+        if k == 0:
+            continue
+        totals += 1
+        # 采用二次选择（若非决赛且淘汰1人），对 S1-34 全部应用
+        probs_ts = compute_rank_probs_with_two_stage(model, ev).detach().cpu().numpy()
+        # 纯排名法（不含二次选择）
+        probs_r = compute_rank_probs_pure(model, ev).detach().cpu().numpy()
+        set_ts = set(np.argsort(-probs_ts)[:k].tolist())
+        set_r = set(np.argsort(-probs_r)[:k].tolist())
+        cons = (set_ts == set_r)
+        count_equal += int(cons)
+        # 标签
+        def label_for(consis: bool, week: int, A: set, B: set):
+            if consis:
+                return f"Wk {week} OK {sorted(list(A))}"
+            else:
+                return f"Wk {week} TS:{sorted(list(A))} R:{sorted(list(B))}"
+        squares_ts_vs_r.setdefault(ev.season, []).append({
+            "correct": cons,
+            "week": ev.week,
+            "name": label_for(cons, ev.week, set_ts, set_r),
+            "is_champion": False,
+        })
+
+    rates_out = {rate_key: (count_equal / totals) if totals else 0.0, "events_count": float(totals)}
+    return rates_out, squares_ts_vs_r
+
+
 def analyze_gamma_vs_age(df: pd.DataFrame, contestants: List[Contestant], model: VotingModel, out_dir: str):
     # 使用训练好的 gamma 与 df 的 celebrity_age_during_season 做散点与回归（线性/二次择优）
     if plt is None:
@@ -1140,14 +1178,19 @@ def infer(data_path: str, best_path: str, out_dir: str, weeks: int = 11, damp: f
             })
     with open(os.path.join(out_dir, "meanV.json"), "w", encoding="utf-8") as f:
         json.dump(meanV_rows, f, ensure_ascii=False, indent=2)
-    # 一致性检验：三组两两一致率 + 三张栅格图
+    # 一致性检验（纯排名法 vs 百分比法 vs pureV）以及二次选择排名法 vs 纯排名法
     rates, sq_rp, sq_rv, sq_pv = build_consistency_data(model, events)
+    rates_ts, sq_ts_vs_r = build_consistency_twostage_vs_rankpure(model, events)
+    # 合并一致性指标并写出 JSON
+    rates_out = dict(rates)
+    rates_out["rank_twostage_vs_rankpure"] = rates_ts.get("rank_twostage_vs_rankpure", 0.0)
     with open(os.path.join(out_dir, "consistency.json"), "w", encoding="utf-8") as f:
-        json.dump(rates, f, ensure_ascii=False, indent=2)
-    # 一致性图改为单列34行布局
+        json.dump(rates_out, f, ensure_ascii=False, indent=2)
+    # 绘图：三张（单列34行）+ 一张（两列各17行）
     plot_accuracy_grid_single_column(sq_rp, os.path.join(out_dir, "consistency_rank_vs_percent.png"))
     plot_accuracy_grid_single_column(sq_rv, os.path.join(out_dir, "consistency_rank_vs_pureV.png"))
     plot_accuracy_grid_single_column(sq_pv, os.path.join(out_dir, "consistency_percent_vs_pureV.png"))
+    plot_accuracy_grid(sq_ts_vs_r, os.path.join(out_dir, "consistency_rank_twostage_vs_rankpure.png"))
     # 回归与箱线图
     # 已删除不需要的 mean(V)~fans 回归散点与 SD 周度箱线图
     # 名人特征分析（第7节）：基于训练好的 gamma 进行年龄回归与分类箱线图

@@ -2,5 +2,6 @@
   "rank_vs_percent": 1.0,
   "rank_vs_pureV": 0.8440677966101695,
   "percent_vs_pureV": 0.8440677966101695,
-  "events_count": 295.0
+  "events_count": 295.0,
+  "rank_twostage_vs_rankpure": 0.9627118644067797
 }
