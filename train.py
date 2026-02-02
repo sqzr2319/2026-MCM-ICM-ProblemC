@@ -1136,6 +1136,44 @@ def plot_controversy_for_one(df: pd.DataFrame, contestants: List[Contestant], ev
     # 生成4行的颜色序列
     rows_labels = ["Actual", "Percent", "Rank", "Rank+TwoStage"]
     rows_colors = [[] for _ in range(4)]
+    rows_texts = [[] for _ in range(4)]  # 每个格子的文字标注（用于决赛标识/名次）
+    # 查找该季的决赛周
+    finals_week = None
+    for ev in evs:
+        if ev.is_final_week:
+            finals_week = ev.week
+            break
+    # 选手的最后活跃周（0 表示冠军）
+    lw_series = df.loc[df["season"].astype(int) == season]
+    lw_series = lw_series.loc[lw_series["celebrity_name"] == celeb_name, "last_active_week"].astype(float)
+    last_active_week = int(pd.to_numeric(lw_series, errors="coerce").fillna(0).iloc[0]) if len(lw_series) else 0
+    is_champion = (last_active_week == 0)
+    # 读取具体名次 placement（优先使用当前 df，缺失时尝试从 data.csv 读取）
+    placement_val = None
+    try:
+        if "placement" in df.columns:
+            pl_series = df.loc[df["season"].astype(int) == season]
+            pl_series = pl_series.loc[pl_series["celebrity_name"] == celeb_name, "placement"]
+            if len(pl_series):
+                placement_val = pd.to_numeric(pl_series.iloc[0], errors="coerce")
+        if (placement_val is None) or (pd.isna(placement_val)):
+            data_csv_path = os.path.join(os.path.dirname(__file__), "data.csv")
+            if os.path.exists(data_csv_path):
+                df2 = pd.read_csv(data_csv_path, dtype=str)
+                df2["season"] = pd.to_numeric(df2["season"], errors="coerce")
+                sel = df2.loc[(df2["season"].astype(int) == season) & (df2["celebrity_name"] == celeb_name)]
+                if ("placement" in sel.columns) and (len(sel) > 0):
+                    placement_val = pd.to_numeric(sel.iloc[0]["placement"], errors="coerce")
+    except Exception:
+        placement_val = placement_val
+    placement_str = None
+    if (placement_val is not None) and (not pd.isna(placement_val)):
+        try:
+            placement_str = f"P{int(float(placement_val))}"
+        except Exception:
+            placement_str = None
+    elif is_champion:
+        placement_str = "P1"
     # 实际结果：直到被淘汰（红），冠军则全绿
     stopped_actual = False
     for ev in evs:
@@ -1143,6 +1181,11 @@ def plot_controversy_for_one(df: pd.DataFrame, contestants: List[Contestant], ev
         eliminated = bool(ev.eliminated_mask[k_idx].item())
         if not stopped_actual:
             rows_colors[0].append('#4CAF50' if not eliminated else '#F44336')
+            # 决赛标识：若进入决赛且此周为决赛周
+            if finals_week is not None and ev.week == finals_week:
+                rows_texts[0].append(placement_str or '')
+            else:
+                rows_texts[0].append('')
             if eliminated:
                 stopped_actual = True
         # 如果已被淘汰，不再添加后续格子
@@ -1159,10 +1202,12 @@ def plot_controversy_for_one(df: pd.DataFrame, contestants: List[Contestant], ev
             k_idx = ev.active_ids.index(gid)
             eliminated_pred = (k_idx in pred_set)
             rows_colors[1].append('#F44336' if eliminated_pred else '#4CAF50')
+            rows_texts[1].append(placement_str if (finals_week is not None and ev.week == finals_week) else '')
             if eliminated_pred:
                 stopped_p = True
         else:
             rows_colors[1].append('#4CAF50')
+            rows_texts[1].append(placement_str if (finals_week is not None and ev.week == finals_week) else '')
     # 排名法预测
     stopped_r = False
     for ev in evs:
@@ -1176,10 +1221,12 @@ def plot_controversy_for_one(df: pd.DataFrame, contestants: List[Contestant], ev
             k_idx = ev.active_ids.index(gid)
             eliminated_pred = (k_idx in pred_set)
             rows_colors[2].append('#F44336' if eliminated_pred else '#4CAF50')
+            rows_texts[2].append(placement_str if (finals_week is not None and ev.week == finals_week) else '')
             if eliminated_pred:
                 stopped_r = True
         else:
             rows_colors[2].append('#4CAF50')
+            rows_texts[2].append(placement_str if (finals_week is not None and ev.week == finals_week) else '')
     # 排名法（含二次选择）预测：即使非 S28-34，也假设启用二次选择
     stopped_rs = False
     for ev in evs:
@@ -1193,10 +1240,12 @@ def plot_controversy_for_one(df: pd.DataFrame, contestants: List[Contestant], ev
             k_idx = ev.active_ids.index(gid)
             eliminated_pred = (k_idx in pred_set)
             rows_colors[3].append('#F44336' if eliminated_pred else '#4CAF50')
+            rows_texts[3].append(placement_str if (finals_week is not None and ev.week == finals_week) else '')
             if eliminated_pred:
                 stopped_rs = True
         else:
             rows_colors[3].append('#4CAF50')
+            rows_texts[3].append(placement_str if (finals_week is not None and ev.week == finals_week) else '')
 
     # 绘制 4 x W 的方格图
     W = max(len(rc) for rc in rows_colors)
@@ -1212,6 +1261,9 @@ def plot_controversy_for_one(df: pd.DataFrame, contestants: List[Contestant], ev
             color = rows_colors[r][w]
             rect = plt.Rectangle((w, 3 - r), 0.9, 0.9, facecolor=color, edgecolor='black', linewidth=0.5)
             ax.add_patch(rect)
+            text = rows_texts[r][w] if w < len(rows_texts[r]) else ''
+            if text:
+                ax.text(w + 0.45, 3 - r + 0.45, text, ha='center', va='center', fontsize=6, color='white')
         # 行标签
         ax.text(-0.5, 3 - r + 0.45, rows_labels[r], ha='right', va='center', fontsize=8)
     # 列标签为周数
