@@ -125,7 +125,7 @@ class VotingModel(nn.Module):
         self.delta2_percent = nn.Parameter(torch.tensor(0.0))
         self.delta1_rank = nn.Parameter(torch.tensor(0.1))
         self.delta2_rank = nn.Parameter(torch.tensor(0.0))
-        self.tau = 60.0
+        self.tau = 80.0
 
     def forward_event(self, event: Event) -> torch.Tensor:
         # P = gamma + delta1 * J_norm + delta2 * F_norm；V 使用 softmax
@@ -1479,23 +1479,102 @@ def infer(data_path: str, best_path: str, out_dir: str, weeks: int = 11, damp: f
     print(f"推理完成。输出保存在 {out_dir}")
 
 
+def sensitivity(data_path: str, out_dir: str, weeks: int = 11, tau_list: List[float] = None, epochs: int = 50, lr: float = 0.05, damp: float = 0.0):
+    # 敏感性分析：仅训练，不做其它绘图；输出每个 tau 的 best_accuracy 与 mean SD(V)，并绘制 tau-指标曲线
+    if tau_list is None or len(tau_list) == 0:
+        tau_list = [5, 10, 20, 40, 60, 80, 100, 120]
+    df = pd.read_csv(data_path, dtype=str)
+    df["season"] = pd.to_numeric(df["season"], errors="coerce")
+    df["index"] = pd.to_numeric(df["index"], errors="coerce")
+    df["last_active_week"] = pd.to_numeric(df["last_active_week"], errors="coerce")
+
+    contestants, events = build_dataset(df, weeks=weeks)
+    results = []
+    for tau in tau_list:
+        model = VotingModel(num_contestants=len(contestants))
+        model.tau = float(tau)
+        opt = torch.optim.Adam(model.parameters(), lr=lr)
+        best_acc = -1.0
+        # 仅训练与评估 accuracy，不做文件输出
+        for ep in range(1, epochs + 1):
+            opt.zero_grad()
+            loss = torch.tensor(0.0)
+            for ev in events:
+                probs = model.forward_event(ev)
+                if ev.eliminated_mask.any():
+                    elim_probs = probs[ev.eliminated_mask]
+                    loss = loss - torch.log(torch.clamp(elim_probs, min=1e-8)).sum()
+            loss.backward()
+            opt.step()
+            # 评估 accuracy，取 best
+            eval_res = evaluate_model(model, events, contestants)
+            acc = float(eval_res["accuracy"])
+            if acc > best_acc:
+                best_acc = acc
+        # 计算 SD(V) 的均值（基于 Delta 方法）
+        fisher_diag = compute_fisher_diag(model, events)
+        sd_map, _ = sd_delta_method(model, events, fisher_diag, damp=damp)
+        sd_vals_all: List[float] = []
+        for ev in events:
+            arr = sd_map.get((ev.season, ev.week))
+            if arr is None:
+                continue
+            v = np.asarray(arr).ravel()
+            v = v[np.isfinite(v)]
+            if v.size:
+                sd_vals_all.append(v)
+        mean_sd = float(np.mean(np.concatenate(sd_vals_all))) if sd_vals_all else 0.0
+        results.append({"tau": float(tau), "best_accuracy": float(best_acc), "mean_sd_V": float(mean_sd)})
+
+    # 输出 JSON 与关系曲线
+    os.makedirs(out_dir, exist_ok=True)
+    with open(os.path.join(out_dir, "sensitivity.json"), "w", encoding="utf-8") as f:
+        json.dump({"results": results}, f, ensure_ascii=False, indent=2)
+    # 绘图（若可用）：双轴曲线 tau vs accuracy 与 tau vs mean_sd
+    if plt is not None and len(results) > 0:
+        taus = [r["tau"] for r in results]
+        accs = [r["best_accuracy"] for r in results]
+        sds = [r["mean_sd_V"] for r in results]
+        fig, ax1 = plt.subplots(figsize=(7, 4))
+        ax1.plot(taus, accs, color="tab:blue", marker="o", label="accuracy")
+        ax1.set_xlabel("tau")
+        ax1.set_ylabel("best accuracy", color="tab:blue")
+        ax1.tick_params(axis='y', labelcolor="tab:blue")
+        ax2 = ax1.twinx()
+        ax2.plot(taus, sds, color="tab:red", marker="s", label="mean SD(V)")
+        ax2.set_ylabel("mean SD(V)", color="tab:red")
+        ax2.tick_params(axis='y', labelcolor="tab:red")
+        fig.tight_layout()
+        plt.savefig(os.path.join(out_dir, "tau_sensitivity.png"), dpi=200)
+        plt.close(fig)
+
+
 def main():
     parser = argparse.ArgumentParser(description="Train voting model per model.md")
     parser.add_argument("--data", default="data_new.csv", help="输入数据 CSV 路径")
     parser.add_argument("--out", default="artifacts", help="输出目录")
-    parser.add_argument("--mode", choices=["train", "infer"], default="train", help="运行模式：train 或 infer")
+    parser.add_argument("--mode", choices=["train", "infer", "sensitivity"], default="train", help="运行模式：train / infer / sensitivity")
     parser.add_argument("--best", default="artifacts/best_params.json", help="infer 模式下读取的 best 参数路径")
     parser.add_argument("--epochs", type=int, default=50, help="训练轮数")
     parser.add_argument("--lr", type=float, default=0.05, help="学习率")
     parser.add_argument("--weeks", type=int, default=11, help="最大周数")
     parser.add_argument("--damp", type=float, default=1e-1, help="SD 计算的阻尼 λ (damping) 用于稳定协方差")
+    parser.add_argument("--tau_list", default="5,10,20,40,60,80,100,120", help="sensitivity 模式下的 tau 列表，逗号分隔")
     args = parser.parse_args()
     if args.mode == "train":
         train(args.data, args.out, epochs=args.epochs, lr=args.lr, weeks=args.weeks)
-    else:
+    elif args.mode == "infer":
         # 推理输出不要与 artifacts 混放，使用单独目录
         infer_out = args.out if args.out != "artifacts" else os.path.join("analysis")
         infer(args.data, args.best, out_dir=infer_out, weeks=args.weeks, damp=args.damp)
+    else:
+        # 敏感性分析：仅训练与指标输出
+        out_dir = args.out if args.out != "artifacts" else os.path.join("sensitivity")
+        try:
+            tau_list = [float(x) for x in str(args.tau_list).split(",") if x.strip()]
+        except Exception:
+            tau_list = [5, 10, 20, 40, 60, 80, 100, 120]
+        sensitivity(args.data, out_dir=out_dir, weeks=args.weeks, tau_list=tau_list, epochs=args.epochs, lr=args.lr, damp=args.damp)
 
 
 if __name__ == "__main__":
