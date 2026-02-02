@@ -1,0 +1,70 @@
+{
+  "gamma": {
+    "celebrity_industry": {
+      "groups": 12,
+      "n": 406,
+      "df_between": 11,
+      "df_within": 394,
+      "F": 2.347353859726084,
+      "p": 0.008256243913364531
+    },
+    "celebrity_homestate": {
+      "groups": 31,
+      "n": 396,
+      "df_between": 30,
+      "df_within": 365,
+      "F": 1.1892447342808106,
+      "p": 0.23097661339610193
+    },
+    "celebrity_homecountry/region": {
+      "groups": 7,
+      "n": 398,
+      "df_between": 6,
+      "df_within": 391,
+      "F": 1.9679808590338166,
+      "p": 0.06919454155751502
+    },
+    "ballroom_partner": {
+      "groups": 36,
+      "n": 393,
+      "df_between": 35,
+      "df_within": 357,
+      "F": 1.9968102760789408,
+      "p": 0.0009765278134333425
+    }
+  },
+  "J_mean": {
+    "celebrity_industry": {
+      "groups": 12,
+      "n": 406,
+      "df_between": 11,
+      "df_within": 394,
+      "F": 3.5403593304507224,
+      "p": 9.290558028550783e-05
+    },
+    "celebrity_homestate": {
+      "groups": 31,
+      "n": 396,
+      "df_between": 30,
+      "df_within": 365,
+      "F": 0.7760037912360477,
+      "p": 0.79748320606964
+    },
+    "celebrity_homecountry/region": {
+      "groups": 7,
+      "n": 398,
+      "df_between": 6,
+      "df_within": 391,
+      "F": 0.8094547901136119,
+      "p": 0.5630042198805358
+    },
+    "ballroom_partner": {
+      "groups": 36,
+      "n": 393,
+      "df_between": 35,
+      "df_within": 357,
+      "F": 3.1965356751834193,
+      "p": 2.018510994356847e-08
+    }
+  }
+}

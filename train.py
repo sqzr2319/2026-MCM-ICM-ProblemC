@@ -886,6 +886,59 @@ def analyze_gamma_vs_age(df: pd.DataFrame, contestants: List[Contestant], model:
         json.dump(out_json, f, ensure_ascii=False, indent=2)
 
 
+def analyze_Jmean_vs_age(df: pd.DataFrame, contestants: List[Contestant], J_mean: np.ndarray, out_dir: str):
+    # 使用每位选手的 J_mean 与 df 的 celebrity_age_during_season 做散点与线性回归
+    if plt is None:
+        print("未安装 matplotlib，跳过 J_mean~age 分析。")
+        return
+    os.makedirs(out_dir, exist_ok=True)
+    ages = []
+    jvals = []
+    for i, c in enumerate(contestants):
+        row = c.row_idx
+        if row < 0 or row >= len(df):
+            continue
+        age_val = pd.to_numeric(df.loc[row, "celebrity_age_during_season"], errors="coerce")
+        jv = J_mean[i] if i < len(J_mean) else np.nan
+        if pd.isna(age_val) or np.isnan(jv):
+            continue
+        ages.append(float(age_val))
+        jvals.append(float(jv))
+    if len(ages) < 3:
+        print("J_mean~age 数据不足，跳过绘图。")
+        return
+    x = np.array(ages)
+    y = np.array(jvals)
+    # 线性拟合
+    p1 = np.polyfit(x, y, 1)
+    y1 = p1[0]*x + p1[1]
+    def r2(y_true, y_pred):
+        ss_res = np.sum((y_true - y_pred)**2)
+        ss_tot = np.sum((y_true - y_true.mean())**2)
+        return 1.0 - (ss_res/ss_tot if ss_tot > 0 else 0.0)
+    r2_lin = r2(y, y1)
+    fig, ax = plt.subplots(figsize=(6, 4))
+    ax.scatter(x, y, s=10, alpha=0.7, label="J_mean vs age")
+    xline = np.linspace(x.min(), x.max(), 200)
+    yline1 = p1[0]*xline + p1[1]
+    ax.plot(xline, yline1, color='tab:green', linewidth=1.5, label=f"Linear R^2={r2_lin:.3f}")
+    ax.set_title("J_mean ~ age (linear regression)")
+    ax.set_xlabel("celebrity_age_during_season")
+    ax.set_ylabel("J_mean")
+    ax.legend(fontsize=8)
+    plt.tight_layout()
+    plt.savefig(os.path.join(out_dir, "J_mean_vs_age_scatter_regression.png"), dpi=200)
+    plt.close(fig)
+    out_json = {
+        "slope": float(p1[0]),
+        "intercept": float(p1[1]),
+        "r2": float(r2_lin),
+        "n": int(len(x))
+    }
+    with open(os.path.join(out_dir, "J_mean_vs_age_regression.json"), "w", encoding="utf-8") as f:
+        json.dump(out_json, f, ensure_ascii=False, indent=2)
+
+
 def boxplot_gamma_by_category(df: pd.DataFrame, contestants: List[Contestant], model: VotingModel, column: str, title: str, out_path: str, min_count: int = 1):
     # 按分类字段绘制 gamma 的箱线图
     if plt is None:
@@ -928,6 +981,136 @@ def boxplot_gamma_by_category(df: pd.DataFrame, contestants: List[Contestant], m
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
     plt.savefig(out_path, dpi=200)
     plt.close(fig)
+
+
+def compute_contestant_J_mean(df: pd.DataFrame, contestants: List[Contestant]) -> np.ndarray:
+    # 计算每位选手的 J 平均分（跨其所有有效周的 week*_avg 列）
+    week_cols = [c for c in df.columns if isinstance(c, str) and c.startswith("week") and c.endswith("_avg")]
+    means = np.full(len(contestants), np.nan, dtype=float)
+    for i, c in enumerate(contestants):
+        row = c.row_idx
+        if row < 0 or row >= len(df):
+            continue
+        vals = pd.to_numeric(df.loc[row, week_cols], errors="coerce").astype(float)
+        vals = vals[~np.isnan(vals)]
+        if len(vals) > 0:
+            means[i] = float(np.mean(vals))
+    return means
+
+
+def scatter_value_vs_numeric(df: pd.DataFrame, contestants: List[Contestant], values: np.ndarray, x_column: str, x_label: str, y_label: str, title: str, out_path: str):
+    if plt is None:
+        print("未安装 matplotlib，跳过散点图。")
+        return
+    xs, ys = [], []
+    for i, c in enumerate(contestants):
+        row = c.row_idx
+        if row < 0 or row >= len(df):
+            continue
+        x = pd.to_numeric(df.loc[row, x_column], errors="coerce") if x_column in df.columns else np.nan
+        y = values[i] if i < len(values) else np.nan
+        if pd.notna(x) and (not np.isnan(y)):
+            xs.append(float(x))
+            ys.append(float(y))
+    if len(xs) < 3:
+        print(f"{title} 数据不足，跳过绘图。")
+        return
+    fig, ax = plt.subplots(figsize=(6, 4))
+    ax.scatter(xs, ys, s=10, alpha=0.7)
+    ax.set_title(title)
+    ax.set_xlabel(x_label)
+    ax.set_ylabel(y_label)
+    plt.tight_layout()
+    os.makedirs(os.path.dirname(out_path), exist_ok=True)
+    plt.savefig(out_path, dpi=200)
+    plt.close(fig)
+
+
+def boxplot_value_by_category(df: pd.DataFrame, contestants: List[Contestant], values: np.ndarray, column: str, title: str, out_path: str, min_count: int = 1):
+    if plt is None:
+        print(f"未安装 matplotlib，跳过 {title} 箱线图。")
+        return
+    groups: Dict[str, List[float]] = {}
+    for i, c in enumerate(contestants):
+        row = c.row_idx
+        if row < 0 or row >= len(df):
+            continue
+        val_raw = df.loc[row, column] if column in df.columns else None
+        if (
+            val_raw is None
+            or (isinstance(val_raw, float) and np.isnan(val_raw))
+            or (isinstance(val_raw, str) and (val_raw.strip() == "" or val_raw.strip().lower() == "nan"))
+        ):
+            key = "non-america" if column == "celebrity_homestate" else "(Unknown)"
+        else:
+            key = str(val_raw)
+        y = values[i] if i < len(values) else np.nan
+        if not np.isnan(y):
+            groups.setdefault(key, []).append(float(y))
+    # 过滤最少样本
+    items = [(k, v) for k, v in groups.items() if len(v) >= min_count]
+    if not items:
+        print(f"{title} 数据不足，跳过绘图。")
+        return
+    items.sort(key=lambda kv: len(kv[1]), reverse=True)
+    labels = [k for k, _ in items[:20]]
+    data = [groups[k] for k in labels]
+    fig, ax = plt.subplots(figsize=(max(8, len(labels)*0.6), 5))
+    ax.boxplot(data, tick_labels=labels)
+    ax.set_title(title)
+    ax.set_ylabel(title.split(" by ")[0])
+    ax.set_xticklabels(labels, rotation=30, ha='right', fontsize=8)
+    plt.tight_layout()
+    os.makedirs(os.path.dirname(out_path), exist_ok=True)
+    plt.savefig(out_path, dpi=200)
+    plt.close(fig)
+
+
+def anova_oneway_by_category(df: pd.DataFrame, contestants: List[Contestant], values: np.ndarray, column: str, min_count: int = 2) -> Dict:
+    # 返回 {k:组数, n:总样本, df_between, df_within, F, p (若可计算)}
+    groups: Dict[str, List[float]] = {}
+    for i, c in enumerate(contestants):
+        row = c.row_idx
+        if row < 0 or row >= len(df):
+            continue
+        val_raw = df.loc[row, column] if column in df.columns else None
+        if (
+            val_raw is None
+            or (isinstance(val_raw, float) and np.isnan(val_raw))
+            or (isinstance(val_raw, str) and (val_raw.strip() == "" or val_raw.strip().lower() == "nan"))
+        ):
+            key = "non-america" if column == "celebrity_homestate" else "(Unknown)"
+        else:
+            key = str(val_raw)
+        y = values[i] if i < len(values) else np.nan
+        if not np.isnan(y):
+            groups.setdefault(key, []).append(float(y))
+    # 过滤小样本组
+    valid = [np.array(v, dtype=float) for v in groups.values() if len(v) >= min_count]
+    k = len(valid)
+    n = int(sum(len(v) for v in valid))
+    res = {"groups": k, "n": n}
+    if k < 2 or n <= k:
+        res.update({"df_between": max(k-1, 0), "df_within": max(n-k, 0), "F": None, "p": None})
+        return res
+    # 计算一元方差分析
+    grand_mean = float(np.mean(np.concatenate(valid)))
+    ss_between = float(sum(len(v)*(np.mean(v)-grand_mean)**2 for v in valid))
+    ss_within = float(sum(np.sum((v - np.mean(v))**2) for v in valid))
+    df_between = k - 1
+    df_within = n - k
+    ms_between = ss_between / df_between if df_between > 0 else np.nan
+    ms_within = ss_within / df_within if df_within > 0 else np.nan
+    F = ms_between / ms_within if (ms_within and ms_within > 0) else np.nan
+    p_val = None
+    try:
+        from scipy.stats import f as f_dist  # 可选
+        if np.isfinite(F):
+            p_val = float(f_dist.sf(F, df_between, df_within))
+    except Exception:
+        p_val = None
+    res.update({"df_between": int(df_between), "df_within": int(df_within), "F": float(F) if np.isfinite(F) else None, "p": p_val})
+    return res
 
 
 def plot_controversy_for_one(df: pd.DataFrame, contestants: List[Contestant], events: List[Event], model: VotingModel, season: int, celeb_name: str, out_path: str):
@@ -1184,16 +1367,19 @@ def infer(data_path: str, best_path: str, out_dir: str, weeks: int = 11, damp: f
     # 合并一致性指标并写出 JSON
     rates_out = dict(rates)
     rates_out["rank_twostage_vs_rankpure"] = rates_ts.get("rank_twostage_vs_rankpure", 0.0)
-    with open(os.path.join(out_dir, "consistency.json"), "w", encoding="utf-8") as f:
+    # 输出到 consistency 子文件夹
+    consistency_out = os.path.join(out_dir, "consistency")
+    os.makedirs(consistency_out, exist_ok=True)
+    with open(os.path.join(consistency_out, "consistency.json"), "w", encoding="utf-8") as f:
         json.dump(rates_out, f, ensure_ascii=False, indent=2)
     # 绘图：三张（单列34行）+ 一张（两列各17行）
-    plot_accuracy_grid_single_column(sq_rp, os.path.join(out_dir, "consistency_rank_vs_percent.png"))
-    plot_accuracy_grid_single_column(sq_rv, os.path.join(out_dir, "consistency_rank_vs_pureV.png"))
-    plot_accuracy_grid_single_column(sq_pv, os.path.join(out_dir, "consistency_percent_vs_pureV.png"))
-    plot_accuracy_grid(sq_ts_vs_r, os.path.join(out_dir, "consistency_rank_twostage_vs_rankpure.png"))
+    plot_accuracy_grid_single_column(sq_rp, os.path.join(consistency_out, "rank_vs_percent.png"))
+    plot_accuracy_grid_single_column(sq_rv, os.path.join(consistency_out, "rank_vs_pureV.png"))
+    plot_accuracy_grid_single_column(sq_pv, os.path.join(consistency_out, "percent_vs_pureV.png"))
+    plot_accuracy_grid(sq_ts_vs_r, os.path.join(consistency_out, "rank_twostage_vs_rankpure.png"))
     # 回归与箱线图
     # 已删除不需要的 mean(V)~fans 回归散点与 SD 周度箱线图
-    # 名人特征分析（第7节）：基于训练好的 gamma 进行年龄回归与分类箱线图
+    # 名人特征分析（第7节）：基于训练好的 gamma/J_mean 进行回归、分类箱线图与 ANOVA
     features_out = os.path.join(out_dir, "features")
     analyze_gamma_vs_age(df, contestants, model, features_out)
     boxplot_gamma_by_category(df, contestants, model, "celebrity_industry", "gamma by industry", os.path.join(features_out, "gamma_by_industry.png"), min_count=3)
@@ -1201,6 +1387,37 @@ def infer(data_path: str, best_path: str, out_dir: str, weeks: int = 11, damp: f
     # 注意列名可能包含斜杠，按原样访问
     col_homecountry = "celebrity_homecountry/region" if "celebrity_homecountry/region" in df.columns else "celebrity_homecountry"
     boxplot_gamma_by_category(df, contestants, model, col_homecountry, "gamma by homecountry/region", os.path.join(features_out, "gamma_by_homecountry.png"), min_count=3)
+    # 新增：gamma by professional dancer partner，列名为 ballroom_partner
+    col_pro = "ballroom_partner" if "ballroom_partner" in df.columns else None
+    if col_pro is None:
+        print("未找到 ballroom_partner 列，跳过专业舞者搭档相关图表。")
+    else:
+        boxplot_gamma_by_category(df, contestants, model, col_pro, "gamma by professional partner", os.path.join(features_out, "gamma_by_pro_partner.png"), min_count=3)
+
+    # 计算 J_mean，并绘制：J_mean vs age 散点 + 分类箱线图
+    J_mean = compute_contestant_J_mean(df, contestants)
+    analyze_Jmean_vs_age(df, contestants, J_mean, features_out)
+    boxplot_value_by_category(df, contestants, J_mean, "celebrity_industry", "J_mean by industry", os.path.join(features_out, "J_mean_by_industry.png"), min_count=3)
+    boxplot_value_by_category(df, contestants, J_mean, "celebrity_homestate", "J_mean by homestate", os.path.join(features_out, "J_mean_by_homestate.png"), min_count=3)
+    boxplot_value_by_category(df, contestants, J_mean, col_homecountry, "J_mean by homecountry/region", os.path.join(features_out, "J_mean_by_homecountry.png"), min_count=3)
+    if col_pro:
+        boxplot_value_by_category(df, contestants, J_mean, col_pro, "J_mean by professional partner", os.path.join(features_out, "J_mean_by_pro_partner.png"), min_count=3)
+
+    # ANOVA：gamma 与 J_mean 分别对上述分类变量
+    anova_cols = ["celebrity_industry", "celebrity_homestate", col_homecountry]
+    if col_pro:
+        anova_cols.append(col_pro)
+    anova_results = {"gamma": {}, "J_mean": {}}
+    # 准备 gamma 向量
+    gamma_vals = np.array([float(model.gamma[i].item()) for i in range(len(contestants))], dtype=float)
+    for col in anova_cols:
+        res_g = anova_oneway_by_category(df, contestants, gamma_vals, col, min_count=3)
+        res_j = anova_oneway_by_category(df, contestants, J_mean, col, min_count=3)
+        anova_results["gamma"][col] = res_g
+        anova_results["J_mean"][col] = res_j
+    os.makedirs(features_out, exist_ok=True)
+    with open(os.path.join(features_out, "anova.json"), "w", encoding="utf-8") as f:
+        json.dump(anova_results, f, ensure_ascii=False, indent=2)
     # 争议名人检验：四个例子各绘制一张 4 行格子图
     controversies_out = os.path.join(out_dir, "controversies")
     plot_controversy_for_one(df, contestants, events, model, 2, "Jerry Rice", os.path.join(controversies_out, "S2_Jerry_Rice.png"))
