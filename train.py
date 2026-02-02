@@ -1549,6 +1549,9 @@ def infer(data_path: str, best_path: str, out_dir: str, weeks: int = 11, damp: f
     plot_accuracy_grid_single_column(sq_rv, os.path.join(consistency_out, "rank_vs_pureV.png"))
     plot_accuracy_grid_single_column(sq_pv, os.path.join(consistency_out, "percent_vs_pureV.png"))
     plot_accuracy_grid(sq_ts_vs_r, os.path.join(consistency_out, "rank_twostage_vs_rankpure.png"))
+    # 生成 best_accuracy_grid（使用 best 参数评估后绘制），以统一字体设置
+    eval_best = evaluate_model(model, events, contestants)
+    plot_accuracy_grid(eval_best["per_season_squares"], os.path.join(out_dir, "best_accuracy_grid.png"))
     # 回归与箱线图
     # 已删除不需要的 mean(V)~fans 回归散点与 SD 周度箱线图
     # 名人特征分析（第7节）：基于训练好的 gamma/J_mean 进行回归、分类箱线图与 ANOVA
