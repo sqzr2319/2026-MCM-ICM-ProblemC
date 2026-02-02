@@ -1232,6 +1232,79 @@ def anova_oneway_by_category(df: pd.DataFrame, contestants: List[Contestant], va
     return res
 
 
+def posthoc_pairwise_by_category(df: pd.DataFrame, contestants: List[Contestant], values: np.ndarray, column: str, min_count: int = 3, adjust: str = "bh") -> Dict:
+    # 对分类变量进行两两比较（Welch t检验），并进行多重比较校正（默认 BH-FDR）。
+    groups: Dict[str, List[float]] = {}
+    for i, c in enumerate(contestants):
+        row = c.row_idx
+        if row < 0 or row >= len(df):
+            continue
+        val_raw = df.loc[row, column] if column in df.columns else None
+        if (
+            val_raw is None
+            or (isinstance(val_raw, float) and np.isnan(val_raw))
+            or (isinstance(val_raw, str) and (val_raw.strip() == "" or val_raw.strip().lower() == "nan"))
+        ):
+            key = "non-america" if column == "celebrity_homestate" else "(Unknown)"
+        else:
+            key = str(val_raw)
+        y = values[i] if i < len(values) else np.nan
+        if not np.isnan(y):
+            groups.setdefault(key, []).append(float(y))
+    items = [(k, np.array(v, dtype=float)) for k, v in groups.items() if len(v) >= min_count]
+    labels = [k for k, _ in items]
+    data = [v for _, v in items]
+    m = len(labels)
+    out = {"pairs": []}
+    if m < 2:
+        return out
+    raw_ps = []
+    idx_map = []
+    # 逐对 Welch t 检验
+    try:
+        from scipy.stats import ttest_ind
+    except Exception:
+        ttest_ind = None
+    for i in range(m):
+        for j in range(i+1, m):
+            a = data[i]; b = data[j]
+            mean_a = float(np.mean(a)); mean_b = float(np.mean(b))
+            std_a = float(np.std(a, ddof=1)) if len(a) > 1 else float("nan")
+            std_b = float(np.std(b, ddof=1)) if len(b) > 1 else float("nan")
+            # Cohen's d（合并标准差）
+            pooled_var = ((len(a)-1)*(std_a**2) + (len(b)-1)*(std_b**2)) / max(len(a)+len(b)-2, 1)
+            cohen_d = (mean_a - mean_b) / (np.sqrt(pooled_var) if pooled_var > 0 else float("nan"))
+            p_raw = None
+            if ttest_ind is not None and len(a) >= 2 and len(b) >= 2:
+                try:
+                    _, pval = ttest_ind(a, b, equal_var=False)
+                    p_raw = float(pval)
+                except Exception:
+                    p_raw = None
+            raw_ps.append(p_raw if p_raw is not None else float("nan"))
+            idx_map.append((i, j))
+            out["pairs"].append({
+                "group1": labels[i], "n1": int(len(a)), "mean1": mean_a, "std1": std_a,
+                "group2": labels[j], "n2": int(len(b)), "mean2": mean_b, "std2": std_b,
+                "diff": float(mean_a - mean_b), "cohen_d": float(cohen_d) if np.isfinite(cohen_d) else None,
+                "p_raw": p_raw
+            })
+    # 多重比较校正（BH-FDR）
+    ps = np.array([p if (p is not None and np.isfinite(p)) else np.nan for p in raw_ps], dtype=float)
+    valid_idx = np.where(~np.isnan(ps))[0]
+    adj = np.full_like(ps, np.nan)
+    if len(valid_idx) > 0:
+        order = valid_idx[np.argsort(ps[valid_idx])]
+        ranks = np.arange(1, len(order)+1)
+        q = ps[order] * len(valid_idx) / ranks
+        q = np.minimum.accumulate(q[::-1])[::-1]
+        adj[order] = np.minimum(q, 1.0)
+    for k, pair in enumerate(out["pairs"]):
+        pair["p_adj"] = float(adj[k]) if np.isfinite(adj[k]) else None
+        pair["reject_bh_0.05"] = bool((pair["p_adj"] is not None) and (pair["p_adj"] < 0.05))
+    return out
+
+
 def plot_controversy_for_one(df: pd.DataFrame, contestants: List[Contestant], events: List[Event], model: VotingModel, season: int, celeb_name: str, out_path: str):
     # 为指定赛季与名人绘制4行格子图：实际、百分比法、排名法、排名法(含二次选择)
     if plt is None:
@@ -1590,6 +1663,23 @@ def infer(data_path: str, best_path: str, out_dir: str, weeks: int = 11, damp: f
     os.makedirs(features_out, exist_ok=True)
     with open(os.path.join(features_out, "anova.json"), "w", encoding="utf-8") as f:
         json.dump(anova_results, f, ensure_ascii=False, indent=2)
+    # 对显著的 ANOVA 分类变量进行事后检验（两两比较 + BH-FDR）
+    posthoc_results = {"gamma": {}, "J_mean": {}}
+    for col in anova_cols:
+        p_g = anova_results["gamma"].get(col, {}).get("p")
+        if (p_g is not None) and (p_g < 0.05):
+            res_g = posthoc_pairwise_by_category(df, contestants, gamma_vals, col, min_count=3, adjust="bh")
+            sig_g = [pair for pair in res_g.get("pairs", []) if pair.get("reject_bh_0.05", False)]
+            if len(sig_g) > 0:
+                posthoc_results["gamma"][col] = {"pairs": sig_g}
+        p_j = anova_results["J_mean"].get(col, {}).get("p")
+        if (p_j is not None) and (p_j < 0.05):
+            res_j = posthoc_pairwise_by_category(df, contestants, J_mean, col, min_count=3, adjust="bh")
+            sig_j = [pair for pair in res_j.get("pairs", []) if pair.get("reject_bh_0.05", False)]
+            if len(sig_j) > 0:
+                posthoc_results["J_mean"][col] = {"pairs": sig_j}
+    with open(os.path.join(features_out, "anova_posthoc.json"), "w", encoding="utf-8") as f:
+        json.dump(posthoc_results, f, ensure_ascii=False, indent=2)
     # 争议名人检验：四个例子各绘制一张 4 行格子图
     controversies_out = os.path.join(out_dir, "controversies")
     plot_controversy_for_one(df, contestants, events, model, 2, "Jerry Rice", os.path.join(controversies_out, "S2_Jerry_Rice.png"))
